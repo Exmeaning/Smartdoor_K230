@@ -1,6 +1,6 @@
 """
 人脸注册功能模块
-修复资源释放顺序问题
+修复：摄像头模式下跳过模型deinit，避免阻塞
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
@@ -21,7 +21,6 @@ import time
 DEBUG = True
 
 def debug_print(*args):
-    """调试打印"""
     if DEBUG:
         print("[DEBUG]", *args)
 
@@ -109,7 +108,6 @@ class FaceFeatureForReg(AIBase):
         self._create_ai2d()
     
     def _create_ai2d(self):
-        """创建新的AI2D实例"""
         self.ai2d = Ai2d(self.debug_mode)
         self.ai2d.set_ai2d_dtype(nn.ai2d_format.NCHW_FMT, nn.ai2d_format.NCHW_FMT,
                                   np.uint8, np.uint8)
@@ -117,10 +115,7 @@ class FaceFeatureForReg(AIBase):
     def config_preprocess(self, landm, input_image_size=None):
         with ScopedTiming("reg set preprocess config", self.debug_mode > 0):
             ai2d_input_size = input_image_size if input_image_size else self.rgb888p_size
-            
-            # 重新创建AI2D实例
             self._create_ai2d()
-            
             affine_matrix = self.get_affine_matrix(landm)
             self.ai2d.affine(nn.interp_method.cv2_bilinear, 0, 0, 127, 1, affine_matrix)
             self.ai2d.build([1, 3, ai2d_input_size[1], ai2d_input_size[0]],
@@ -233,7 +228,7 @@ class FaceFeatureForReg(AIBase):
 
 
 class FaceRegister:
-    """人脸注册器 - 修复资源释放顺序"""
+    """人脸注册器 - 修复摄像头模式下的资源释放问题"""
     
     def __init__(self, database_dir, debug_mode=1):
         self.database_dir = database_dir
@@ -251,7 +246,6 @@ class FaceRegister:
         debug_print("Loading anchors...")
         self.anchors = np.fromfile(self.anchors_path, dtype=np.float)
         self.anchors = self.anchors.reshape((4200, 4))
-        debug_print("Anchors loaded")
         
         self.face_det = None
         self.face_reg = None
@@ -302,33 +296,40 @@ class FaceRegister:
         
         print("[FaceRegister] Models loaded")
     
-    def _deinit_models(self):
-        """释放模型 - 添加详细日志"""
-        debug_print("=== Deinitializing models ===")
+    def _deinit_models_safe(self, use_camera=False):
+        """安全释放模型
         
-        if self.face_det:
-            debug_print("Deinitializing face_det...")
-            try:
-                self.face_det.deinit()
-                debug_print("face_det.deinit() completed")
-            except Exception as e:
-                debug_print("face_det deinit error:", e)
+        Args:
+            use_camera: 是否使用了摄像头模式。
+                       如果是，不调用deinit()，只设置为None让GC处理
+        """
+        debug_print("=== Safe deinit models (camera=%s) ===" % use_camera)
+        
+        if use_camera:
+            # 摄像头模式：不调用deinit，只清空引用
+            # 因为在Pipeline存在时调用deinit会阻塞
+            debug_print("Camera mode: skip deinit, set to None only")
             self.face_det = None
-            debug_print("face_det set to None")
-        
-        if self.face_reg:
-            debug_print("Deinitializing face_reg...")
-            try:
-                self.face_reg.deinit()
-                debug_print("face_reg.deinit() completed")
-            except Exception as e:
-                debug_print("face_reg deinit error:", e)
             self.face_reg = None
-            debug_print("face_reg set to None")
+        else:
+            # 静态图片模式：可以安全调用deinit
+            if self.face_det:
+                debug_print("Deinit face_det...")
+                try:
+                    self.face_det.deinit()
+                except Exception as e:
+                    debug_print("face_det deinit error:", e)
+                self.face_det = None
+            
+            if self.face_reg:
+                debug_print("Deinit face_reg...")
+                try:
+                    self.face_reg.deinit()
+                except Exception as e:
+                    debug_print("face_reg deinit error:", e)
+                self.face_reg = None
         
-        debug_print("Calling gc.collect()...")
-        gc.collect()
-        debug_print("=== Models deinitialized ===")
+        debug_print("Models released")
     
     def _image_to_nchw(self, img):
         img_rgb888 = img.to_rgb888()
@@ -368,6 +369,7 @@ class FaceRegister:
         return feature
     
     def register_from_photo(self, user_id, photo_path):
+        """从照片注册人脸（不使用摄像头）"""
         print("[FaceRegister] Register from photo:", photo_path)
         
         try:
@@ -406,11 +408,12 @@ class FaceRegister:
             return False, str(e)
         
         finally:
-            self._deinit_models()
+            # 静态图片模式，可以安全deinit
+            self._deinit_models_safe(use_camera=False)
             gc.collect()
     
     def register_from_camera(self, user_id, timeout_sec=10):
-        """从摄像头注册人脸 - 修复资源释放顺序"""
+        """从摄像头注册人脸"""
         print("[FaceRegister] Register from camera, user:", user_id)
         
         pl = None
@@ -489,7 +492,6 @@ class FaceRegister:
                                 registered = True
                                 message = "Registered:" + user_id
                                 
-                                # 显示成功
                                 pl.osd_img.clear()
                                 pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, 
                                                           color=(255, 0, 255, 0), thickness=4)
@@ -539,14 +541,14 @@ class FaceRegister:
             print("[FaceRegister] Camera error:", e)
             message = str(e)
         
-        # ========== 关键修复：正确的资源释放顺序 ==========
+        # ========== 关键：正确的清理顺序 ==========
         debug_print("=== Cleanup phase ===")
         
-        # 步骤1：先释放模型（在Pipeline还活着的时候）
-        debug_print("Step 1: Deinit models first (while pipeline is alive)...")
-        self._deinit_models()
+        # 步骤1：清空模型引用（不调用deinit，避免阻塞）
+        debug_print("Step 1: Release model references (no deinit)...")
+        self._deinit_models_safe(use_camera=True)
         
-        # 步骤2：然后销毁Pipeline
+        # 步骤2：销毁Pipeline
         if pl:
             debug_print("Step 2: Destroying pipeline...")
             try:
@@ -554,9 +556,10 @@ class FaceRegister:
                 debug_print("Pipeline destroyed")
             except Exception as e:
                 debug_print("Pipeline destroy error:", e)
+            pl = None
         
-        # 步骤3：最终GC
-        debug_print("Step 3: Final gc.collect()...")
+        # 步骤3：强制GC
+        debug_print("Step 3: Force gc.collect()...")
         gc.collect()
         debug_print("=== Cleanup completed ===")
         
