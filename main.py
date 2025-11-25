@@ -1,97 +1,42 @@
 """
-K230 从机端主程序 - 多线程版本
-支持人脸检测、识别、注册功能
+K230 从机端主程序 - 摄像头常驻版
 """
 
-import time
-import gc
 from libs.K230SlaveController import K230SlaveController
 from libs.K230Protocol import K230Protocol
 
-# 导入功能模块
-from ai_modules.face_detection import (
-    face_detect_init,
-    face_detect_handler,
-    face_detect_deinit
-)
-
-from ai_modules.face_recognition import (
-    face_recog_init,
-    face_recog_handler,
-    face_recog_deinit
-)
-
-from ai_modules.face_register import (
-    face_register_from_photo,
-    face_register_from_camera
-)
-
-
 def main():
     print("=" * 50)
-    print("K230 Slave Controller (Multi-thread)")
-    print("Face Detection / Recognition / Registration")
+    print("K230 Slave Controller")
+    print("Camera Always-On Mode")
     print("=" * 50)
     
-    # 创建控制器
     controller = K230SlaveController(baudrate=115200)
     
-    # 注册循环执行的AI功能
-    controller.register_function(
-        K230Protocol.ID_FACE_DETECT,
-        face_detect_handler,
-        face_detect_init,
-        face_detect_deinit
-    )
-    
-    controller.register_function(
-        K230Protocol.ID_FACE_RECOGNITION,
-        face_recog_handler,
-        face_recog_init,
-        face_recog_deinit
-    )
-    
-    # 注册人脸注册处理器
-    controller.register_photo_handler(face_register_from_photo)
-    controller.register_camera_handler(face_register_from_camera)
-    
-    # 设置配置
-    controller.config['database_dir'] = '/data/face_database/'
-    controller.config['face_threshold'] = 0.65
-    controller.config['detect_threshold'] = 0.5
-    controller.config['register_timeout'] = 15
-    
-    print("\n=== Multi-thread Architecture ===")
-    print("  Main Thread:  Command processing")
-    print("  AI Thread:    AI inference loop")
-    
-    print("\n=== Registered Functions ===")
-    print("  Face Detection   (ID=%d)" % K230Protocol.ID_FACE_DETECT)
-    print("  Face Recognition (ID=%d)" % K230Protocol.ID_FACE_RECOGNITION)
+    # 可选：注册摄像头注册处理器
+    # from ai_modules.face_register import face_register_from_camera
+    # controller.register_camera_handler(face_register_from_camera)
     
     print("\n=== Commands ===")
-    print("  $CMD,START,6#   - Start face detection")
-    print("  $CMD,START,8#   - Start face recognition")
-    print("  $CMD,STOP#      - Stop (non-blocking!)")
-    print("  $CMD,PING#      - Test connection")
-    print("  $CMD,STATUS#    - Get status")
-    
-    print("\n" + "=" * 50)
-    print("Waiting for commands...")
+    print("  $CMD,START,6#     - Face Detection")
+    print("  $CMD,START,8#     - Face Recognition")
+    print("  $CMD,STOP#        - Stop AI")
+    print("  $CMD,SET,fps,15#  - Set camera FPS")
+    print("  $CMD,GET,fps#     - Get camera FPS")
+    print("  $CMD,PING#        - Test connection")
+    print("  $CMD,STATUS#      - Get status")
     print("=" * 50 + "\n")
     
     try:
         controller.run()
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
+        print("\nInterrupted")
     except Exception as e:
-        print("Fatal error:", e)
+        print("Error:", e)
         import sys
         sys.print_exception(e)
     finally:
         controller.deinit()
-        print("K230 Slave Controller stopped")
-
 
 if __name__ == "__main__":
     main()
