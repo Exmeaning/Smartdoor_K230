@@ -1,6 +1,6 @@
 """
 人脸注册功能模块
-修复：摄像头模式下跳过模型deinit，避免阻塞
+修复：正确的资源释放顺序
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
@@ -228,7 +228,7 @@ class FaceFeatureForReg(AIBase):
 
 
 class FaceRegister:
-    """人脸注册器 - 修复摄像头模式下的资源释放问题"""
+    """人脸注册器 - 修复资源释放顺序"""
     
     def __init__(self, database_dir, debug_mode=1):
         self.database_dir = database_dir
@@ -296,34 +296,29 @@ class FaceRegister:
         
         print("[FaceRegister] Models loaded")
     
-    def _deinit_models_safe(self, use_camera=False):
-        """安全释放模型"""
-        debug_print("=== _deinit_models_safe(use_camera=%s) ===" % use_camera)
-    
-        if use_camera:
-            # 摄像头模式：绝对不调用 deinit，只清空引用
-            debug_print("Camera mode: skip deinit, only set to None")
-            self.face_det = None
-            self.face_reg = None
-        else:
-            # 静态图片模式：可以调用 deinit
-            if self.face_det:
-                debug_print("Deinit face_det...")
-                try:
-                    self.face_det.deinit()
-                except Exception as e:
-                    debug_print("face_det deinit error:", e)
-                self.face_det = None
+    def _deinit_models(self):
+        """释放模型资源 - 必须在 Pipeline 销毁后调用"""
+        debug_print("Releasing models...")
         
-            if self.face_reg:
-                debug_print("Deinit face_reg...")
-                try:
-                    self.face_reg.deinit()
-                except Exception as e:
-                    debug_print("face_reg deinit error:", e)
-                self.face_reg = None
-    
-        debug_print("_deinit_models_safe done")
+        if self.face_det:
+            try:
+                debug_print("  deinit face_det...")
+                self.face_det.deinit()
+                debug_print("  face_det released")
+            except Exception as e:
+                debug_print("  face_det deinit error:", e)
+            self.face_det = None
+        
+        if self.face_reg:
+            try:
+                debug_print("  deinit face_reg...")
+                self.face_reg.deinit()
+                debug_print("  face_reg released")
+            except Exception as e:
+                debug_print("  face_reg deinit error:", e)
+            self.face_reg = None
+        
+        debug_print("Models released")
     
     def _image_to_nchw(self, img):
         img_rgb888 = img.to_rgb888()
@@ -402,8 +397,8 @@ class FaceRegister:
             return False, str(e)
         
         finally:
-            # 静态图片模式，可以安全deinit
-            self._deinit_models_safe(use_camera=False)
+            # 静态图片模式，直接释放
+            self._deinit_models()
             gc.collect()
     
     def register_from_camera(self, user_id, timeout_sec=10):
@@ -535,16 +530,13 @@ class FaceRegister:
             print("[FaceRegister] Camera error:", e)
             message = str(e)
         
-        # ========== 关键：正确的清理顺序 ==========
+        # ========== 关键修复：正确的清理顺序 ==========
         debug_print("=== Cleanup phase ===")
         
-        # 步骤1：清空模型引用（不调用deinit，避免阻塞）
-        debug_print("Step 1: Release model references (no deinit)...")
-        self._deinit_models_safe(use_camera=True)
-        
-        # 步骤2：销毁Pipeline
+        # 步骤1：先销毁Pipeline（停止媒体流）
+        # 必须先停止媒体，否则模型deinit会阻塞
         if pl:
-            debug_print("Step 2: Destroying pipeline...")
+            debug_print("Step 1: Destroying pipeline first...")
             try:
                 pl.destroy()
                 debug_print("Pipeline destroyed")
@@ -552,9 +544,22 @@ class FaceRegister:
                 debug_print("Pipeline destroy error:", e)
             pl = None
         
-        # 步骤3：强制GC
-        debug_print("Step 3: Force gc.collect()...")
+        # 步骤2：等待媒体完全停止
+        debug_print("Step 2: Wait for media to fully stop...")
+        time.sleep(0.3)  # 给系统一点时间完成清理
+        
+        # 步骤3：释放模型资源（现在媒体已停止，不会阻塞）
+        debug_print("Step 3: Release model resources...")
+        self._deinit_models()
+        
+        # 步骤4：强制GC
+        debug_print("Step 4: Force gc.collect()...")
         gc.collect()
+        
+        # 步骤5：再等待一下确保资源完全释放
+        debug_print("Step 5: Final wait...")
+        time.sleep(0.2)
+        
         debug_print("=== Cleanup completed ===")
         
         return registered, message
