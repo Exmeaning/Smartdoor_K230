@@ -45,6 +45,7 @@ class K230Protocol:
     CMD_SET = "SET"
     CMD_GET = "GET"
     CMD_RELOAD = "RELOAD"       # 重新加载数据库
+    CMD_FRESET = "FRESET"       # 强制重置媒体资源
     
     # ========== 响应类型定义 ==========
     RSP_OK = "OK"

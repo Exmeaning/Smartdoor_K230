@@ -126,19 +126,20 @@ class MediaHelper:
         debug_print("=== Force stopping media ===")
         
         try:
-            # 尝试调用底层媒体释放
-            from media.media import media
-            media.release()
-            debug_print("media.release() called")
-        except Exception as e:
-            debug_print("media.release() error:", e)
-        
-        try:
+            # 尝试停止sensor
             from media.sensor import sensor
             sensor.stop()
             debug_print("sensor.stop() called")
         except Exception as e:
             debug_print("sensor.stop() error:", e)
+        
+        try:
+            # 尝试释放media
+            from media.media import media
+            media.release()
+            debug_print("media.release() called")
+        except Exception as e:
+            debug_print("media.release() error:", e)
         
         gc.collect()
         time.sleep(0.5)
