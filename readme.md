@@ -1,4 +1,6 @@
-# K230 AI Vision Controller
+# Smartdoor_K230
+
+这是SmartDoor项目配套的 运行在K230上的程序
 
 基于嘉楠 K230 的 AI 视觉从机控制器，支持人脸检测、人脸识别、人脸注册等功能。
 
@@ -267,70 +269,7 @@ $RSP,OK,Reloaded#
 5. **摘除遮挡** - 摘下口罩、墨镜等遮挡物
 6. **单人注册** - 确保画面中只有一个人
 
----
 
-### 典型使用场景
-
-#### 场景 1：门禁系统注册
-
-```python
-# 主控 MCU 代码示例
-def register_new_user(user_id):
-    uart.send(f"$CMD,REGCAM,{user_id}#")
-    
-    # 等待响应（最长 15 秒）
-    response = uart.read(timeout=15000)
-    
-    if "Registered" in response:
-        print(f"用户 {user_id} 注册成功")
-        return True
-    else:
-        print(f"注册失败: {response}")
-        return False
-
-# 注册新员工
-register_new_user("employee_001")
-```
-
-#### 场景 2：批量管理
-
-```python
-# 查看所有用户
-uart.send("$CMD,LIST#")
-users = parse_response(uart.read())  # ['zhangsan', 'lisi', 'wangwu']
-
-# 删除离职员工
-uart.send("$CMD,DELETE,zhangsan#")
-
-# 刷新数据库
-uart.send("$CMD,RELOAD#")
-```
-
-#### 场景 3：识别+注册联动
-
-```python
-# 启动人脸识别
-uart.send("$CMD,START,8#")
-
-while True:
-    data = uart.read()
-    if data:
-        name, score = parse_face_data(data)
-        
-        if name == "unknown":
-            # 检测到陌生人，询问是否注册
-            if confirm_register():
-                uart.send("$CMD,STOP#")
-                new_id = input("请输入用户ID: ")
-                uart.send(f"$CMD,REGCAM,{new_id}#")
-                # 等待注册完成
-                uart.read(timeout=15000)
-                uart.send("$CMD,START,8#")
-        else:
-            print(f"欢迎 {name}! 匹配度: {score}%")
-```
-
----
 
 ## 架构设计
 
@@ -531,62 +470,7 @@ class CameraManager:
 | 切换时暂停摄像头 | 摄像头永远运行 |
 | 复杂的资源状态机 | 简单的 stop→deinit→init→start |
 
-**最终架构**：
 
-```python
-class K230Controller:
-    def __init__(self):
-        self.pl = None           # 单一 Pipeline
-        self.active_module = None  # 当前激活的模块
-    
-    def init(self):
-        # 只初始化 Pipeline，不加载任何 AI 模型
-        self.pl = PipeLine(...)
-        self.pl.create()
-    
-    def switch_to(self, mode):
-        # 1. 停止并释放当前模块
-        if self.active_module:
-            self.active_module.stop()
-            self.active_module.deinit()
-            gc.collect()
-        
-        # 2. 创建新模块（此时才加载模型）
-        module = self._create_module(mode)
-        module.init()    # 加载 AI 模型
-        module.start()   # 开始运行
-        
-        self.active_module = module
-    
-    def run(self):
-        while True:
-            self._process_command()
-            if self.active_module:
-                self.active_module.run_once(self.pl)  # 复用 Pipeline
-            else:
-                self.pl.get_frame()
-                self.pl.show_image()  # 空闲也要刷新
-```
-
-**关键改变**：
-
-| 项目 | 之前（失败） | 现在（成功） |
-|------|-------------|-------------|
-| 模型加载 | 启动时预加载全部 | 需要时延迟加载 |
-| 资源管理 | CameraManager + AIProcessor 分离 | 单一 PipeLine |
-| 模块切换 | 尝试保持模型常驻 | stop→deinit→init→start |
-| 人脸注册 | 创建独立 PipeLine | 复用主循环 PipeLine |
-| 代码行数 | 2000+ 行 | ~800 行 |
-
-**效果**：
-
-| 操作 | 原方案 | 最终方案 |
-|------|--------|----------|
-| 启动人脸检测 | 2.5s / 常卡死 | 0.3s / 稳定 |
-| 切换到人脸识别 | 3.0s / 偶尔卡死 | 0.5s / 稳定 |
-| 人脸注册 | 卡死 | 稳定 |
-| 停止 | 0.5s | 即时 |
-| 稳定性 | 💀 | ✅ |
 
 ---
 
