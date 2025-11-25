@@ -30,19 +30,21 @@ class K230Protocol:
     ID_OBSTACLE_DETECT = 21
     ID_MULTI_COLOR = 22
     ID_FINGER_GUESS = 23
-    ID_FACE_REGISTER = 100  # 自定义: 人脸注册
+    ID_FACE_REGISTER = 100
     
     # ========== 命令类型定义 ==========
-    CMD_START = "START"       # 启动功能
-    CMD_STOP = "STOP"         # 停止功能
-    CMD_REG = "REG"           # 人脸注册
-    CMD_STATUS = "STATUS"     # 查询状态
-    CMD_RESET = "RESET"       # 重置系统
-    CMD_PING = "PING"         # 心跳检测
-    CMD_LIST = "LIST"         # 列出注册人脸
-    CMD_DELETE = "DELETE"     # 删除注册人脸
-    CMD_SET = "SET"           # 设置参数
-    CMD_GET = "GET"           # 获取参数
+    CMD_START = "START"
+    CMD_STOP = "STOP"
+    CMD_REG = "REG"             # 从照片注册
+    CMD_REGCAM = "REGCAM"       # 从摄像头注册
+    CMD_STATUS = "STATUS"
+    CMD_RESET = "RESET"
+    CMD_PING = "PING"
+    CMD_LIST = "LIST"
+    CMD_DELETE = "DELETE"
+    CMD_SET = "SET"
+    CMD_GET = "GET"
+    CMD_RELOAD = "RELOAD"       # 重新加载数据库
     
     # ========== 响应类型定义 ==========
     RSP_OK = "OK"
@@ -51,34 +53,28 @@ class K230Protocol:
     RSP_READY = "READY"
     RSP_PONG = "PONG"
     RSP_DATA = "DATA"
+    RSP_PROGRESS = "PROG"       # 进度
     
     # ========== 状态定义 ==========
     STATE_IDLE = 0
     STATE_RUNNING = 1
     STATE_ERROR = 2
     STATE_BUSY = 3
+    STATE_REGISTERING = 4       # 注册中
     
     def __init__(self):
         self.debug = False
     
-    # ========== 命令解析 ==========
     def parse_command(self, data):
-        """
-        解析接收到的命令
-        命令格式: $CMD,<cmd_type>,<param1>,<param2>,...#
-        
-        返回: (cmd_type, params_list) 或 (None, None)
-        """
+        """解析接收到的命令"""
         try:
             data = data.strip()
             
-            # 检查协议头尾
             if not data.startswith('$CMD,') or not data.endswith('#'):
                 if self.debug:
                     print("[Protocol] Invalid format:", data)
                 return None, None
             
-            # 提取内容 (去掉 $CMD, 和 #)
             content = data[5:-1]
             parts = content.split(',')
             
@@ -97,12 +93,8 @@ class K230Protocol:
             print("[Protocol] Parse error:", e)
             return None, None
     
-    # ========== 响应构建 ==========
     def build_response(self, rsp_type, msg="", extra_data=None):
-        """
-        构建响应包
-        响应格式: $RSP,<len>,<rsp_type>,<msg>[,<extra_data>]#\n
-        """
+        """构建响应包"""
         if extra_data is None:
             temp = "$RSP,00,%s,%s#" % (rsp_type, msg)
             pto_len = len(temp)
@@ -112,7 +104,6 @@ class K230Protocol:
             pto_len = len(temp)
             return "$RSP,%02d,%s,%s,%s#\n" % (pto_len, rsp_type, msg, extra_data)
     
-    # ========== 数据包构建方法 ==========
     def build_coord_packet(self, func_id, x, y, w, h, msg=None):
         """构建坐标数据包"""
         if msg is None:
@@ -143,11 +134,9 @@ class K230Protocol:
     
     # ========== 特定功能数据包 ==========
     def get_face_detect_data(self, x, y, w, h):
-        """人脸检测数据包"""
         return self.build_coord_packet(self.ID_FACE_DETECT, int(x), int(y), int(w), int(h))
     
     def get_face_recognition_data(self, x, y, w, h, name, score):
-        """人脸识别数据包"""
         return self.build_msg_value_packet(
             self.ID_FACE_RECOGNITION, 
             int(x), int(y), int(w), int(h), 
@@ -156,22 +145,17 @@ class K230Protocol:
         )
     
     def get_person_detect_data(self, x, y, w, h):
-        """人体检测数据包"""
         return self.build_coord_packet(self.ID_PERSON_DETECT, int(x), int(y), int(w), int(h))
     
     def get_hand_detect_data(self, x, y, w, h):
-        """手部检测数据包"""
         return self.build_coord_packet(self.ID_HAND_DETECT, int(x), int(y), int(w), int(h))
     
     def get_hand_gesture_data(self, gesture):
-        """手势识别数据包"""
         return self.build_message_packet(self.ID_HAND_GESTURE, gesture)
     
     def get_object_detect_data(self, x, y, w, h, label):
-        """物体检测数据包"""
         return self.build_coord_packet(self.ID_OBJECT_DETECT, int(x), int(y), int(w), int(h), label)
     
     def get_register_result_data(self, success, user_id, msg=""):
-        """人脸注册结果数据包"""
         status = 1 if success else 0
         return self.build_message_packet(self.ID_FACE_REGISTER, "%s,%d,%s" % (user_id, status, msg))
