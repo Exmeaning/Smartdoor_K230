@@ -1,7 +1,6 @@
 """
 人脸注册功能模块
-支持从照片和摄像头两种方式注册
-添加详细调试日志
+修复资源释放顺序问题
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
@@ -88,7 +87,7 @@ class FaceDetForReg(AIBase):
 
 
 class FaceFeatureForReg(AIBase):
-    """人脸特征提取类（用于注册）- 修复版"""
+    """人脸特征提取类（用于注册）"""
     
     def __init__(self, kmodel_path, model_input_size, rgb888p_size=[640, 480], debug_mode=0):
         super().__init__(kmodel_path, model_input_size, rgb888p_size, debug_mode)
@@ -98,7 +97,6 @@ class FaceFeatureForReg(AIBase):
         self.rgb888p_size = [ALIGN_UP(rgb888p_size[0], 16), rgb888p_size[1]]
         self.debug_mode = debug_mode
         
-        # 标准人脸5关键点坐标（用于对齐到112x112）
         self.umeyama_args_112 = [
             38.2946, 51.6963,
             73.5318, 51.5014,
@@ -107,7 +105,6 @@ class FaceFeatureForReg(AIBase):
             70.7299, 92.2041
         ]
         
-        # AI2D实例 - 每次config_preprocess都需要重新创建
         self.ai2d = None
         self._create_ai2d()
     
@@ -118,35 +115,22 @@ class FaceFeatureForReg(AIBase):
                                   np.uint8, np.uint8)
     
     def config_preprocess(self, landm, input_image_size=None):
-        """配置预处理 - 每次需要重新创建AI2D"""
         with ScopedTiming("reg set preprocess config", self.debug_mode > 0):
             ai2d_input_size = input_image_size if input_image_size else self.rgb888p_size
             
-            debug_print("Feature config_preprocess input_size:", ai2d_input_size)
-            debug_print("Feature landm:", landm[:10] if len(landm) >= 10 else landm)
-            
-            # 重新创建AI2D实例（重要！）
+            # 重新创建AI2D实例
             self._create_ai2d()
             
-            # 计算仿射变换矩阵
             affine_matrix = self.get_affine_matrix(landm)
-            debug_print("Affine matrix:", affine_matrix)
-            
-            # 配置仿射变换
             self.ai2d.affine(nn.interp_method.cv2_bilinear, 0, 0, 127, 1, affine_matrix)
-            
-            # 构建预处理
             self.ai2d.build([1, 3, ai2d_input_size[1], ai2d_input_size[0]],
                            [1, 3, self.model_input_size[1], self.model_input_size[0]])
-            
-            debug_print("Feature config_preprocess done")
     
     def postprocess(self, results):
         with ScopedTiming("reg postprocess", self.debug_mode > 0):
             return results[0][0]
     
     def svd22(self, a):
-        """2x2矩阵SVD分解"""
         s = [0.0, 0.0]
         u = [0.0, 0.0, 0.0, 0.0]
         v = [0.0, 0.0, 0.0, 0.0]
@@ -172,7 +156,6 @@ class FaceFeatureForReg(AIBase):
         return u, s, v
     
     def image_umeyama_112(self, src):
-        """Umeyama对齐算法"""
         SRC_NUM = 5
         SRC_DIM = 2
         
@@ -239,7 +222,6 @@ class FaceFeatureForReg(AIBase):
     
     def get_affine_matrix(self, sparse_points):
         with ScopedTiming("get_affine_matrix", self.debug_mode > 1):
-            # 转换为列表（如果是numpy数组）
             if hasattr(sparse_points, 'tolist'):
                 sparse_points = sparse_points.tolist()
             elif hasattr(sparse_points, '__iter__'):
@@ -251,40 +233,33 @@ class FaceFeatureForReg(AIBase):
 
 
 class FaceRegister:
-    """人脸注册器 - 增强调试版"""
+    """人脸注册器 - 修复资源释放顺序"""
     
     def __init__(self, database_dir, debug_mode=1):
         self.database_dir = database_dir
         self.debug_mode = debug_mode
         
-        # 模型路径
         self.face_det_kmodel = "/sdcard/kmodel/face_detection_320.kmodel"
         self.face_reg_kmodel = "/sdcard/kmodel/face_recognition.kmodel"
         self.anchors_path = "/sdcard/utils/prior_data_320.bin"
         
-        # 模型参数
         self.det_input_size = [320, 320]
         self.reg_input_size = [112, 112]
         self.confidence_threshold = 0.5
         self.nms_threshold = 0.2
         
-        # 加载anchors
         debug_print("Loading anchors...")
         self.anchors = np.fromfile(self.anchors_path, dtype=np.float)
         self.anchors = self.anchors.reshape((4200, 4))
-        debug_print("Anchors loaded, shape:", self.anchors.shape)
+        debug_print("Anchors loaded")
         
-        # 模型实例
         self.face_det = None
         self.face_reg = None
         
-        # 确保数据库目录存在
         self._ensure_dir(self.database_dir)
-        
         print("[FaceRegister] Initialized, database:", self.database_dir)
     
     def _ensure_dir(self, directory):
-        """递归创建目录"""
         if not directory or directory == '/':
             return
         directory = directory.rstrip('/')
@@ -303,16 +278,11 @@ class FaceRegister:
                 pass
     
     def _init_models(self, input_size):
-        """初始化模型"""
         if self.face_det is not None:
-            debug_print("Models already initialized")
             return
         
         print("[FaceRegister] Loading models...")
-        debug_print("Input size:", input_size)
         
-        # 检测模型
-        debug_print("Loading face detection model...")
         self.face_det = FaceDetForReg(
             self.face_det_kmodel,
             model_input_size=self.det_input_size,
@@ -322,40 +292,45 @@ class FaceRegister:
             rgb888p_size=input_size,
             debug_mode=self.debug_mode
         )
-        debug_print("Face detection model loaded")
         
-        # 特征提取模型
-        debug_print("Loading face recognition model...")
         self.face_reg = FaceFeatureForReg(
             self.face_reg_kmodel,
             model_input_size=self.reg_input_size,
             rgb888p_size=input_size,
             debug_mode=self.debug_mode
         )
-        debug_print("Face recognition model loaded")
         
         print("[FaceRegister] Models loaded")
     
     def _deinit_models(self):
-        """释放模型"""
-        debug_print("Deinitializing models...")
+        """释放模型 - 添加详细日志"""
+        debug_print("=== Deinitializing models ===")
+        
         if self.face_det:
+            debug_print("Deinitializing face_det...")
             try:
                 self.face_det.deinit()
+                debug_print("face_det.deinit() completed")
             except Exception as e:
                 debug_print("face_det deinit error:", e)
             self.face_det = None
+            debug_print("face_det set to None")
+        
         if self.face_reg:
+            debug_print("Deinitializing face_reg...")
             try:
                 self.face_reg.deinit()
+                debug_print("face_reg.deinit() completed")
             except Exception as e:
                 debug_print("face_reg deinit error:", e)
             self.face_reg = None
+            debug_print("face_reg set to None")
+        
+        debug_print("Calling gc.collect()...")
         gc.collect()
-        debug_print("Models deinitialized")
+        debug_print("=== Models deinitialized ===")
     
     def _image_to_nchw(self, img):
-        """将图像转换为NCHW格式的numpy数组"""
         img_rgb888 = img.to_rgb888()
         img_hwc = img_rgb888.to_numpy_ref()
         shape = img_hwc.shape
@@ -368,18 +343,10 @@ class FaceRegister:
         return img_nchw
     
     def _extract_feature(self, input_np, landm, input_size):
-        """提取人脸特征 - 独立函数便于调试"""
         debug_print("=== Starting feature extraction ===")
         debug_print("input_np shape:", input_np.shape)
         debug_print("input_size:", input_size)
-        debug_print("landm type:", type(landm))
-        debug_print("landm value:", landm)
         
-        # 验证landm
-        if landm is None:
-            raise ValueError("landm is None")
-        
-        # 转换landm为列表
         if hasattr(landm, 'tolist'):
             landm_list = landm.tolist()
         else:
@@ -388,14 +355,12 @@ class FaceRegister:
         debug_print("landm_list:", landm_list[:10] if len(landm_list) >= 10 else landm_list)
         
         if len(landm_list) < 10:
-            raise ValueError("landm should have at least 10 values (5 points x 2)")
+            raise ValueError("landm should have at least 10 values")
         
-        # 配置预处理
         debug_print("Calling config_preprocess...")
         self.face_reg.config_preprocess(landm_list, input_image_size=input_size)
         debug_print("config_preprocess done")
         
-        # 运行推理
         debug_print("Running feature extraction inference...")
         feature = self.face_reg.run(input_np)
         debug_print("Feature extracted, shape:", feature.shape if hasattr(feature, 'shape') else len(feature))
@@ -403,38 +368,22 @@ class FaceRegister:
         return feature
     
     def register_from_photo(self, user_id, photo_path):
-        """从照片注册人脸"""
         print("[FaceRegister] Register from photo:", photo_path)
         
         try:
-            # 检查照片是否存在
             try:
                 os.stat(photo_path)
             except:
                 return False, "Photo not found"
             
-            # 读取图片
-            debug_print("Loading image...")
             img = image.Image(photo_path)
-            debug_print("Image loaded")
-            
-            # 转换为NCHW格式
-            debug_print("Converting to NCHW...")
             input_np = self._image_to_nchw(img)
             input_size = [input_np.shape[3], input_np.shape[2]]
-            debug_print("Input size:", input_size)
             
-            # 初始化模型
             self._init_models(input_size)
-            
-            # 配置检测预处理
-            debug_print("Configuring detection preprocess...")
             self.face_det.config_preprocess(input_image_size=input_size)
             
-            # 检测人脸
-            debug_print("Running face detection...")
             det_boxes, landms = self.face_det.run(input_np)
-            debug_print("Detection result - boxes:", det_boxes, "landms:", landms)
             
             if det_boxes is None or len(det_boxes) == 0:
                 return False, "No face detected"
@@ -442,13 +391,9 @@ class FaceRegister:
             if len(det_boxes) > 1:
                 return False, "Multiple faces detected"
             
-            # 提取特征
-            debug_print("Extracting feature...")
             feature = self._extract_feature(input_np, landms[0], input_size)
             
-            # 保存特征到数据库
             feature_path = self.database_dir + user_id + ".bin"
-            debug_print("Saving feature to:", feature_path)
             with open(feature_path, "wb") as f:
                 f.write(feature.tobytes())
             
@@ -458,7 +403,6 @@ class FaceRegister:
         except Exception as e:
             import sys
             sys.print_exception(e)
-            print("[FaceRegister] Error:", e)
             return False, str(e)
         
         finally:
@@ -466,31 +410,25 @@ class FaceRegister:
             gc.collect()
     
     def register_from_camera(self, user_id, timeout_sec=10):
-        """从摄像头注册人脸"""
+        """从摄像头注册人脸 - 修复资源释放顺序"""
         print("[FaceRegister] Register from camera, user:", user_id)
         
         pl = None
+        registered = False
+        message = "Timeout"
         
         try:
             rgb888p_size = [640, 480]
             display_size = [640, 480]
             
-            # 创建Pipeline
             debug_print("Creating pipeline...")
             pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
             pl.create()
             debug_print("Pipeline created")
             
-            # 初始化模型
             self._init_models(rgb888p_size)
-            
-            debug_print("Configuring detection preprocess...")
             self.face_det.config_preprocess(input_image_size=rgb888p_size)
-            debug_print("Detection preprocess configured")
             
-            # 注册状态
-            registered = False
-            message = "Timeout"
             start_time = time.time()
             stable_count = 0
             required_stable = 5
@@ -499,13 +437,9 @@ class FaceRegister:
             print("[FaceRegister] Looking for face...")
             
             while time.time() - start_time < timeout_sec:
-                # 获取帧
                 img = pl.get_frame()
-                
-                # 检测人脸
                 det_boxes, landms = self.face_det.run(img)
                 
-                # 清除OSD
                 pl.osd_img.clear()
                 
                 if det_boxes is not None and len(det_boxes) == 1:
@@ -517,7 +451,7 @@ class FaceRegister:
                     
                     if face_area > frame_area * 0.05:
                         stable_count += 1
-                        last_landm = landms[0]  # 保存landmarks
+                        last_landm = landms[0]
                         
                         x_d = x * display_size[0] // rgb888p_size[0]
                         y_d = y * display_size[1] // rgb888p_size[1]
@@ -533,7 +467,6 @@ class FaceRegister:
                         if stable_count >= required_stable and last_landm is not None:
                             print("[FaceRegister] Face stable, extracting feature...")
                             
-                            # 显示处理中
                             pl.osd_img.clear()
                             pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, 
                                                       color=(255, 255, 255, 0), thickness=4)
@@ -543,16 +476,15 @@ class FaceRegister:
                             pl.show_image()
                             
                             try:
-                                # 提取特征
                                 debug_print("About to extract feature...")
                                 feature = self._extract_feature(img, last_landm, rgb888p_size)
                                 debug_print("Feature extracted successfully")
                                 
-                                # 保存特征
                                 feature_path = self.database_dir + user_id + ".bin"
                                 debug_print("Saving to:", feature_path)
                                 with open(feature_path, "wb") as f:
                                     f.write(feature.tobytes())
+                                debug_print("Feature saved")
                                 
                                 registered = True
                                 message = "Registered:" + user_id
@@ -571,8 +503,6 @@ class FaceRegister:
                             except Exception as e:
                                 import sys
                                 sys.print_exception(e)
-                                debug_print("Feature extraction error:", e)
-                                # 重置计数，重试
                                 stable_count = 0
                                 last_landm = None
                                 
@@ -603,27 +533,36 @@ class FaceRegister:
                 pl.show_image()
                 gc.collect()
             
-            return registered, message
-            
         except Exception as e:
             import sys
             sys.print_exception(e)
             print("[FaceRegister] Camera error:", e)
-            return False, str(e)
+            message = str(e)
         
-        finally:
-            debug_print("Cleaning up...")
-            self._deinit_models()
-            if pl:
-                try:
-                    pl.destroy()
-                except Exception as e:
-                    debug_print("Pipeline destroy error:", e)
-            gc.collect()
-            debug_print("Cleanup done")
+        # ========== 关键修复：正确的资源释放顺序 ==========
+        debug_print("=== Cleanup phase ===")
+        
+        # 步骤1：先释放模型（在Pipeline还活着的时候）
+        debug_print("Step 1: Deinit models first (while pipeline is alive)...")
+        self._deinit_models()
+        
+        # 步骤2：然后销毁Pipeline
+        if pl:
+            debug_print("Step 2: Destroying pipeline...")
+            try:
+                pl.destroy()
+                debug_print("Pipeline destroyed")
+            except Exception as e:
+                debug_print("Pipeline destroy error:", e)
+        
+        # 步骤3：最终GC
+        debug_print("Step 3: Final gc.collect()...")
+        gc.collect()
+        debug_print("=== Cleanup completed ===")
+        
+        return registered, message
     
     def delete_user(self, user_id):
-        """删除用户"""
         try:
             feature_path = self.database_dir + user_id + ".bin"
             os.remove(feature_path)
@@ -632,7 +571,6 @@ class FaceRegister:
             return False, "User not found"
     
     def list_users(self):
-        """列出所有注册用户"""
         try:
             users = []
             for item in os.listdir(self.database_dir):
@@ -646,19 +584,16 @@ class FaceRegister:
 # ========== 命令处理函数 ==========
 
 def face_register_from_photo(controller, user_id, photo_path):
-    """从照片注册人脸"""
     database_dir = controller.config.get('database_dir', '/data/face_database/')
     registrar = FaceRegister(database_dir, debug_mode=1)
     return registrar.register_from_photo(user_id, photo_path)
 
 
 def face_register_from_camera(controller, user_id, timeout=10):
-    """从摄像头注册人脸"""
     database_dir = controller.config.get('database_dir', '/data/face_database/')
     registrar = FaceRegister(database_dir, debug_mode=1)
     return registrar.register_from_camera(user_id, timeout)
 
 
-# 向后兼容
 def face_register_handler(controller, user_id, photo_path):
     return face_register_from_photo(controller, user_id, photo_path)
