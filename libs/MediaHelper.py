@@ -1,6 +1,6 @@
 """
 K230 媒体资源管理助手
-解决摄像头、Pipeline、AI模型的资源释放问题
+修复：使用正确的 MediaManager API
 """
 
 from media.media import *
@@ -19,17 +19,17 @@ class MediaHelper:
     """
     媒体资源管理器
     
-    K230 资源释放的正确顺序：
+    K230 资源释放的正确顺序（根据官方文档）：
     1. 停止帧处理循环
-    2. 销毁 Pipeline（停止 sensor 和 display）
-    3. 等待媒体系统完全停止
+    2. 调用 sensor.stop()（必须在 MediaManager.deinit() 之前）
+    3. 调用 MediaManager.deinit()
     4. 释放 AI 模型
     5. 强制 GC
-    6. 最后等待确保资源释放
     """
     
-    # 类变量：追踪当前活跃的 Pipeline
+    # 类变量：追踪当前活跃的资源
     _active_pipeline = None
+    _active_sensor = None
     _active_models = []
     
     @classmethod
@@ -50,10 +50,11 @@ class MediaHelper:
             debug_print("Pipeline destroyed")
         except Exception as e:
             debug_print("Pipeline destroy error:", e)
-            # 尝试强制停止
-            cls._force_stop_media()
+            # 尝试手动清理
+            cls._manual_cleanup()
         
         cls._active_pipeline = None
+        cls._active_sensor = None
         
         # 等待媒体系统停止
         debug_print("Waiting for media to stop...")
@@ -64,9 +65,6 @@ class MediaHelper:
         """
         安全释放模型列表
         必须在 Pipeline 销毁之后调用！
-        
-        Args:
-            models: 模型列表，如 [detector, recognizer] 或单个模型
         """
         debug_print("=== release_models_safe ===")
         
@@ -94,12 +92,6 @@ class MediaHelper:
     def cleanup_all(cls, pipeline=None, models=None, wait_time=0.5):
         """
         完整清理：Pipeline + 模型
-        这是推荐的清理方法！
-        
-        Args:
-            pipeline: PipeLine 对象
-            models: 模型或模型列表
-            wait_time: 最后等待时间（秒）
         """
         debug_print("=== cleanup_all START ===")
         
@@ -121,28 +113,19 @@ class MediaHelper:
         debug_print("=== cleanup_all DONE ===")
     
     @classmethod
-    def _force_stop_media(cls):
-        """强制停止媒体系统（紧急情况使用）"""
-        debug_print("=== Force stopping media ===")
+    def _manual_cleanup(cls):
+        """手动清理媒体资源"""
+        debug_print("=== Manual cleanup ===")
         
+        # 尝试调用 MediaManager.deinit()
         try:
-            # 尝试停止sensor
-            from media.sensor import sensor
-            sensor.stop()
-            debug_print("sensor.stop() called")
+            MediaManager.deinit()
+            debug_print("MediaManager.deinit() called")
         except Exception as e:
-            debug_print("sensor.stop() error:", e)
-        
-        try:
-            # 尝试释放media
-            from media.media import media
-            media.release()
-            debug_print("media.release() called")
-        except Exception as e:
-            debug_print("media.release() error:", e)
+            debug_print("MediaManager.deinit() error:", e)
         
         gc.collect()
-        time.sleep(0.5)
+        time.sleep(0.3)
     
     @classmethod
     def force_reset(cls):
@@ -154,39 +137,37 @@ class MediaHelper:
         
         # 清空追踪
         cls._active_pipeline = None
+        cls._active_sensor = None
         cls._active_models.clear()
         
-        # 强制停止
-        cls._force_stop_media()
+        # 尝试调用 MediaManager.deinit()
+        try:
+            MediaManager.deinit()
+            debug_print("MediaManager.deinit() success")
+        except Exception as e:
+            debug_print("MediaManager.deinit() error:", e)
         
         # 多次 GC
         for i in range(3):
             gc.collect()
-            time.sleep(0.1)
+            time.sleep(0.2)
         
         debug_print("=== FORCE RESET DONE ===")
     
     @classmethod
     def register_pipeline(cls, pipeline):
-        """注册活跃的 Pipeline（用于追踪）"""
+        """注册活跃的 Pipeline"""
         cls._active_pipeline = pipeline
     
     @classmethod
     def register_model(cls, model):
-        """注册活跃的模型（用于追踪）"""
+        """注册活跃的模型"""
         if model not in cls._active_models:
             cls._active_models.append(model)
 
 
 def safe_cleanup(pipeline=None, models=None):
-    """
-    便捷清理函数
-    
-    用法：
-        safe_cleanup(pl, detector)
-        safe_cleanup(pl, [detector, recognizer])
-        safe_cleanup(pipeline=pl, models=[det, reg])
-    """
+    """便捷清理函数"""
     MediaHelper.cleanup_all(pipeline, models)
 
 
