@@ -297,22 +297,16 @@ class FaceRegister:
         print("[FaceRegister] Models loaded")
     
     def _deinit_models_safe(self, use_camera=False):
-        """安全释放模型
-        
-        Args:
-            use_camera: 是否使用了摄像头模式。
-                       如果是，不调用deinit()，只设置为None让GC处理
-        """
-        debug_print("=== Safe deinit models (camera=%s) ===" % use_camera)
-        
+        """安全释放模型"""
+        debug_print("=== _deinit_models_safe(use_camera=%s) ===" % use_camera)
+    
         if use_camera:
-            # 摄像头模式：不调用deinit，只清空引用
-            # 因为在Pipeline存在时调用deinit会阻塞
-            debug_print("Camera mode: skip deinit, set to None only")
+            # 摄像头模式：绝对不调用 deinit，只清空引用
+            debug_print("Camera mode: skip deinit, only set to None")
             self.face_det = None
             self.face_reg = None
         else:
-            # 静态图片模式：可以安全调用deinit
+            # 静态图片模式：可以调用 deinit
             if self.face_det:
                 debug_print("Deinit face_det...")
                 try:
@@ -320,7 +314,7 @@ class FaceRegister:
                 except Exception as e:
                     debug_print("face_det deinit error:", e)
                 self.face_det = None
-            
+        
             if self.face_reg:
                 debug_print("Deinit face_reg...")
                 try:
@@ -328,8 +322,8 @@ class FaceRegister:
                 except Exception as e:
                     debug_print("face_reg deinit error:", e)
                 self.face_reg = None
-        
-        debug_print("Models released")
+    
+        debug_print("_deinit_models_safe done")
     
     def _image_to_nchw(self, img):
         img_rgb888 = img.to_rgb888()
@@ -415,61 +409,61 @@ class FaceRegister:
     def register_from_camera(self, user_id, timeout_sec=10):
         """从摄像头注册人脸"""
         print("[FaceRegister] Register from camera, user:", user_id)
-    
+        
         pl = None
         registered = False
         message = "Timeout"
-    
+        
         try:
             rgb888p_size = [640, 480]
             display_size = [640, 480]
-        
+            
             debug_print("Creating pipeline...")
             pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
             pl.create()
             debug_print("Pipeline created")
-        
+            
             self._init_models(rgb888p_size)
             self.face_det.config_preprocess(input_image_size=rgb888p_size)
-        
+            
             start_time = time.time()
             stable_count = 0
             required_stable = 5
             last_landm = None
-        
+            
             print("[FaceRegister] Looking for face...")
-        
+            
             while time.time() - start_time < timeout_sec:
                 img = pl.get_frame()
                 det_boxes, landms = self.face_det.run(img)
-            
+                
                 pl.osd_img.clear()
-            
+                
                 if det_boxes is not None and len(det_boxes) == 1:
                     det = det_boxes[0]
                     x, y, w, h = map(lambda v: int(round(v, 0)), det[:4])
-                
+                    
                     face_area = w * h
                     frame_area = rgb888p_size[0] * rgb888p_size[1]
-                
+                    
                     if face_area > frame_area * 0.05:
                         stable_count += 1
                         last_landm = landms[0]
-                    
+                        
                         x_d = x * display_size[0] // rgb888p_size[0]
                         y_d = y * display_size[1] // rgb888p_size[1]
                         w_d = w * display_size[0] // rgb888p_size[0]
                         h_d = h * display_size[1] // rgb888p_size[1]
-                    
+                        
                         pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, 
                                                   color=(255, 0, 255, 0), thickness=4)
                         pl.osd_img.draw_string_advanced(x_d, y_d - 30, 24, 
                                                         "Hold... %d/%d" % (stable_count, required_stable),
                                                         color=(255, 255, 255, 0))
-                    
+                        
                         if stable_count >= required_stable and last_landm is not None:
                             print("[FaceRegister] Face stable, extracting feature...")
-                        
+                            
                             pl.osd_img.clear()
                             pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, 
                                                       color=(255, 255, 255, 0), thickness=4)
@@ -477,102 +471,93 @@ class FaceRegister:
                                                             "Processing...",
                                                             color=(255, 255, 0, 0))
                             pl.show_image()
-                        
-                            try:
-                                feature = self._extract_feature(img, last_landm, rgb888p_size)
                             
+                            try:
+                                debug_print("About to extract feature...")
+                                feature = self._extract_feature(img, last_landm, rgb888p_size)
+                                debug_print("Feature extracted successfully")
+                                
                                 feature_path = self.database_dir + user_id + ".bin"
+                                debug_print("Saving to:", feature_path)
                                 with open(feature_path, "wb") as f:
                                     f.write(feature.tobytes())
-                            
+                                debug_print("Feature saved")
+                                
                                 registered = True
                                 message = "Registered:" + user_id
-                            
+                                
                                 pl.osd_img.clear()
+                                pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, 
+                                                          color=(255, 0, 255, 0), thickness=4)
                                 pl.osd_img.draw_string_advanced(x_d, y_d - 30, 24, 
                                                                 "Success!",
                                                                 color=(255, 0, 255, 0))
                                 pl.show_image()
                                 time.sleep(1)
                                 break
-                            
+                                
                             except Exception as e:
                                 import sys
                                 sys.print_exception(e)
                                 stable_count = 0
                                 last_landm = None
+                                
+                                pl.osd_img.clear()
+                                pl.osd_img.draw_string_advanced(10, 10, 24, 
+                                                                "Error, retry...",
+                                                                color=(255, 255, 0, 0))
                     else:
                         stable_count = 0
                         last_landm = None
-                        pl.osd_img.draw_string_advanced(10, 10, 24, "Move closer",
+                        pl.osd_img.draw_string_advanced(10, 10, 24, 
+                                                        "Move closer",
                                                         color=(255, 255, 0, 0))
-            
+                
                 elif det_boxes is not None and len(det_boxes) > 1:
                     stable_count = 0
                     last_landm = None
-                    pl.osd_img.draw_string_advanced(10, 10, 24, "One face only",
+                    pl.osd_img.draw_string_advanced(10, 10, 24, 
+                                                    "One face only",
                                                     color=(255, 255, 0, 0))
                 else:
                     stable_count = 0
                     last_landm = None
-                    pl.osd_img.draw_string_advanced(10, 10, 24, "No face",
+                    pl.osd_img.draw_string_advanced(10, 10, 24, 
+                                                    "No face",
                                                     color=(255, 255, 0, 0))
-            
+                
                 pl.show_image()
                 gc.collect()
-        
+            
         except Exception as e:
             import sys
             sys.print_exception(e)
+            print("[FaceRegister] Camera error:", e)
             message = str(e)
-    
-        finally:
-            # ========== 关键：正确的清理顺序 ==========
-            debug_print("=== Cleanup phase ===")
         
-            # 步骤1：先销毁 Pipeline（必须在 deinit 模型之前！）
-            if pl:
-                debug_print("Step 1: Destroying pipeline FIRST...")
-                try:
-                    pl.destroy()
-                    debug_print("Pipeline destroyed")
-                except Exception as e:
-                    debug_print("Pipeline destroy error:", e)
-                pl = None
+        # ========== 关键：正确的清理顺序 ==========
+        debug_print("=== Cleanup phase ===")
         
-            # 步骤2：等待一下让资源稳定
-            time.sleep(0.1)
+        # 步骤1：清空模型引用（不调用deinit，避免阻塞）
+        debug_print("Step 1: Release model references (no deinit)...")
+        self._deinit_models_safe(use_camera=True)
         
-            # 步骤3：现在可以安全 deinit 模型了
-            debug_print("Step 2: Deinit models...")
-            self._deinit_models()
+        # 步骤2：销毁Pipeline
+        if pl:
+            debug_print("Step 2: Destroying pipeline...")
+            try:
+                pl.destroy()
+                debug_print("Pipeline destroyed")
+            except Exception as e:
+                debug_print("Pipeline destroy error:", e)
+            pl = None
         
-            # 步骤4：强制 GC
-            debug_print("Step 3: gc.collect()...")
-            gc.collect()
-            debug_print("=== Cleanup completed ===")
-    
+        # 步骤3：强制GC
+        debug_print("Step 3: Force gc.collect()...")
+        gc.collect()
+        debug_print("=== Cleanup completed ===")
+        
         return registered, message
-    
-    def _deinit_models(self):
-        """释放模型资源（确保 Pipeline 已经销毁后调用）"""
-        if self.face_det:
-            debug_print("Deinit face_det...")
-            try:
-                self.face_det.deinit()
-            except Exception as e:
-                debug_print("face_det deinit error:", e)
-            self.face_det = None
-    
-        if self.face_reg:
-            debug_print("Deinit face_reg...")
-            try:
-                self.face_reg.deinit()
-            except Exception as e:
-                debug_print("face_reg deinit error:", e)
-            self.face_reg = None
-    
-        debug_print("Models released")
     
     def delete_user(self, user_id):
         try:
