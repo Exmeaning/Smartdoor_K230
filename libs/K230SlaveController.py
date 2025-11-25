@@ -317,17 +317,21 @@ class K230SlaveController:
     def run(self):
         """主循环"""
         print("[Controller] Starting...")
-        
-        # 启动摄像头
+    
+        # 【修改】先创建AI处理器（延迟加载模型）
+        self.ai = AIProcessor(
+            rgb_size=[640, 480],  # 先用默认值
+            display_size=[640, 480]
+        )
+    
+        # 然后启动摄像头
         if not self.camera.start(fps=self.config['idle_fps']):
             print("[Controller] Camera start failed!")
             return
-        
-        # 创建AI处理器
-        self.ai = AIProcessor(
-            rgb_size=self.camera.get_rgb_size(),
-            display_size=self.camera.get_display_size()
-        )
+    
+        # 更新 AI 处理器的尺寸
+        self.ai.rgb_size = self.camera.get_rgb_size()
+        self.ai.display_size = self.camera.get_display_size()
         
         self.running = True
         self.send_response(K230Protocol.RSP_READY, "K230")
