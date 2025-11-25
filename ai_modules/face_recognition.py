@@ -1,10 +1,12 @@
 """
 人脸识别功能模块 - 单帧处理模式
+修复：使用 MediaHelper 正确释放资源
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
+from libs.MediaHelper import MediaHelper, safe_cleanup
 from media.media import *
 import nncase_runtime as nn
 import ulab.numpy as np
@@ -311,9 +313,20 @@ class FaceRecognitionEngine:
         self.db_features = []
         self._load_database()
     
+    def get_models(self):
+        """获取所有模型（用于统一释放）"""
+        return [self.face_det, self.face_feature]
+    
     def deinit(self):
-        self.face_det.deinit()
-        self.face_feature.deinit()
+        """释放模型资源（由 MediaHelper 调用）"""
+        try:
+            self.face_det.deinit()
+        except:
+            pass
+        try:
+            self.face_feature.deinit()
+        except:
+            pass
 
 
 # ========== 功能接口 ==========
@@ -321,6 +334,9 @@ class FaceRecognitionEngine:
 def face_recog_init(controller):
     """初始化人脸识别"""
     print("[FaceRecog] Initializing...")
+    
+    # 初始化前先强制清理
+    MediaHelper.force_reset()
     
     kmodel_det = "/sdcard/kmodel/face_detection_320.kmodel"
     kmodel_reg = "/sdcard/kmodel/face_recognition.kmodel"
@@ -337,6 +353,7 @@ def face_recog_init(controller):
     
     pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
     pl.create()
+    MediaHelper.register_pipeline(pl)
     
     engine = FaceRecognitionEngine(
         kmodel_det, kmodel_reg,
@@ -348,6 +365,10 @@ def face_recog_init(controller):
         rgb888p_size=rgb888p_size,
         display_size=display_size
     )
+    
+    # 注册模型
+    for model in engine.get_models():
+        MediaHelper.register_model(model)
     
     print("[FaceRecog] Initialized")
     
@@ -411,13 +432,20 @@ def face_recog_handler(controller, stop_check):
 
 
 def face_recog_deinit(obj):
-    """清理人脸识别"""
+    """清理人脸识别 - 使用正确的清理顺序"""
     print("[FaceRecog] Deinitializing...")
+    
     try:
-        if obj and 'engine' in obj:
-            obj['engine'].deinit()
-        if obj and 'pipeline' in obj:
-            obj['pipeline'].destroy()
+        pipeline = obj.get('pipeline') if obj else None
+        engine = obj.get('engine') if obj else None
+        
+        # 使用 MediaHelper 统一清理
+        # 注意：engine 本身不是模型，需要获取其内部模型
+        models = engine.get_models() if engine else None
+        safe_cleanup(pipeline=pipeline, models=models)
+        
     except Exception as e:
         print("[FaceRecog] Deinit error:", e)
+        MediaHelper.force_reset()
+    
     print("[FaceRecog] Deinitialized")

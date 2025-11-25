@@ -1,10 +1,12 @@
 """
 人脸检测功能模块 - 单帧处理模式
+修复：使用 MediaHelper 正确释放资源
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
+from libs.MediaHelper import MediaHelper, safe_cleanup
 from media.media import *
 import nncase_runtime as nn
 import ulab.numpy as np
@@ -74,6 +76,9 @@ def face_detect_init(controller):
     """初始化人脸检测"""
     print("[FaceDetect] Initializing...")
     
+    # 初始化前先强制清理，确保资源干净
+    MediaHelper.force_reset()
+    
     kmodel_path = "/sdcard/kmodel/face_detection_320.kmodel"
     anchors_path = "/sdcard/utils/prior_data_320.bin"
     
@@ -89,6 +94,7 @@ def face_detect_init(controller):
     # 创建Pipeline
     pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
     pl.create()
+    MediaHelper.register_pipeline(pl)
     
     # 创建检测器
     face_det = FaceDetectionApp(
@@ -102,6 +108,7 @@ def face_detect_init(controller):
         debug_mode=0
     )
     face_det.config_preprocess()
+    MediaHelper.register_model(face_det)
     
     print("[FaceDetect] Initialized")
     
@@ -117,7 +124,6 @@ def face_detect_init(controller):
 def face_detect_handler(controller, stop_check):
     """
     人脸检测处理函数 - 每次调用处理一帧
-    注意：这个函数会被主循环反复调用，不是自己循环！
     """
     obj = controller.current_func_obj
     if obj is None:
@@ -169,13 +175,19 @@ def face_detect_handler(controller, stop_check):
 
 
 def face_detect_deinit(obj):
-    """清理人脸检测"""
+    """清理人脸检测 - 使用正确的清理顺序"""
     print("[FaceDetect] Deinitializing...")
+    
     try:
-        if obj and 'detector' in obj:
-            obj['detector'].deinit()
-        if obj and 'pipeline' in obj:
-            obj['pipeline'].destroy()
+        pipeline = obj.get('pipeline') if obj else None
+        detector = obj.get('detector') if obj else None
+        
+        # 使用 MediaHelper 统一清理（顺序正确）
+        safe_cleanup(pipeline=pipeline, models=detector)
+        
     except Exception as e:
         print("[FaceDetect] Deinit error:", e)
+        # 出错时强制重置
+        MediaHelper.force_reset()
+    
     print("[FaceDetect] Deinitialized")

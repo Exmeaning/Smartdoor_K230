@@ -7,6 +7,7 @@ from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
 from media.media import *
+from libs.MediaHelper import MediaHelper, safe_cleanup
 import nncase_runtime as nn
 import ulab.numpy as np
 import aidemo
@@ -405,6 +406,9 @@ class FaceRegister:
         """从摄像头注册人脸"""
         print("[FaceRegister] Register from camera, user:", user_id)
         
+        # 初始化前先强制清理
+        MediaHelper.force_reset()
+        
         pl = None
         registered = False
         message = "Timeout"
@@ -530,35 +534,22 @@ class FaceRegister:
             print("[FaceRegister] Camera error:", e)
             message = str(e)
         
-        # ========== 关键修复：正确的清理顺序 ==========
+        # ========== 使用 MediaHelper 统一清理 ==========
         debug_print("=== Cleanup phase ===")
         
-        # 步骤1：先销毁Pipeline（停止媒体流）
-        # 必须先停止媒体，否则模型deinit会阻塞
-        if pl:
-            debug_print("Step 1: Destroying pipeline first...")
-            try:
-                pl.destroy()
-                debug_print("Pipeline destroyed")
-            except Exception as e:
-                debug_print("Pipeline destroy error:", e)
-            pl = None
+        # 收集需要释放的模型
+        models = []
+        if self.face_det:
+            models.append(self.face_det)
+        if self.face_reg:
+            models.append(self.face_reg)
         
-        # 步骤2：等待媒体完全停止
-        debug_print("Step 2: Wait for media to fully stop...")
-        time.sleep(0.3)  # 给系统一点时间完成清理
+        # 使用统一清理函数
+        safe_cleanup(pipeline=pl, models=models)
         
-        # 步骤3：释放模型资源（现在媒体已停止，不会阻塞）
-        debug_print("Step 3: Release model resources...")
-        self._deinit_models()
-        
-        # 步骤4：强制GC
-        debug_print("Step 4: Force gc.collect()...")
-        gc.collect()
-        
-        # 步骤5：再等待一下确保资源完全释放
-        debug_print("Step 5: Final wait...")
-        time.sleep(0.2)
+        # 清空引用
+        self.face_det = None
+        self.face_reg = None
         
         debug_print("=== Cleanup completed ===")
         
