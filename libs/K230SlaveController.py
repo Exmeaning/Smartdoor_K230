@@ -1,24 +1,17 @@
 """
 K230 从机控制器
-管理命令接收、功能调度和状态维护
+单线程状态机模式，避免多线程问题
 """
 
 import time
 import gc
-import _thread
 from libs.K230Protocol import K230Protocol
 from libs.K230Uart import K230Uart
 
 class K230SlaveController:
-    """K230从机主控制器"""
+    """K230从机主控制器 - 单线程状态机"""
     
     def __init__(self, baudrate=115200):
-        """
-        初始化控制器
-        
-        参数:
-            baudrate: 波特率
-        """
         # 通信模块
         self.uart = K230Uart(baudrate=baudrate)
         self.protocol = K230Protocol()
@@ -30,11 +23,12 @@ class K230SlaveController:
         self.stop_flag = False
         
         # 功能模块注册表
-        self.func_handlers = {}
-        self.func_init_handlers = {}
-        self.func_deinit_handlers = {}
+        self.func_handlers = {}           # 循环处理函数
+        self.func_init_handlers = {}      # 初始化函数
+        self.func_deinit_handlers = {}    # 清理函数
+        self.func_once_handlers = {}      # 一次性执行函数（如注册）
         
-        # 命令处理器注册表
+        # 命令处理器
         self.cmd_handlers = {
             K230Protocol.CMD_START: self._handle_start,
             K230Protocol.CMD_STOP: self._handle_stop,
@@ -56,25 +50,17 @@ class K230SlaveController:
             'database_dir': '/data/face_database/',
         }
         
-        # 线程锁
-        self.lock = _thread.allocate_lock()
-        
         # 当前功能对象
         self.current_func_obj = None
         
-        print("[Controller] Initialized")
+        # 命令队列（用于在功能运行时处理命令）
+        self.pending_stop = False
+        
+        print("[Controller] Initialized (Single-thread mode)")
     
     # ========== 功能注册 ==========
     def register_function(self, func_id, handler, init_handler=None, deinit_handler=None):
-        """
-        注册功能模块
-        
-        参数:
-            func_id: 功能ID
-            handler: 功能处理函数 handler(controller, stop_flag_callback)
-            init_handler: 初始化函数 init_handler(controller) -> obj
-            deinit_handler: 清理函数 deinit_handler(obj)
-        """
+        """注册循环执行的功能模块"""
         self.func_handlers[func_id] = handler
         if init_handler:
             self.func_init_handlers[func_id] = init_handler
@@ -82,25 +68,16 @@ class K230SlaveController:
             self.func_deinit_handlers[func_id] = deinit_handler
         print("[Controller] Registered function:", func_id)
     
-    def register_command(self, cmd_type, handler):
-        """
-        注册自定义命令处理器
-        
-        参数:
-            cmd_type: 命令类型字符串
-            handler: 处理函数 handler(params) -> (success, message)
-        """
-        self.cmd_handlers[cmd_type] = handler
+    def register_once_function(self, func_id, handler):
+        """注册一次性执行的功能（如人脸注册）"""
+        self.func_once_handlers[func_id] = handler
+        print("[Controller] Registered once-function:", func_id)
     
     # ========== 数据发送 ==========
     def send_response(self, rsp_type, msg="", data=None):
         """发送响应"""
         rsp = self.protocol.build_response(rsp_type, msg, data)
         self.uart.send(rsp)
-    
-    def send_data(self, data_packet):
-        """发送数据包"""
-        self.uart.send(data_packet)
     
     def send_face_detect(self, x, y, w, h):
         """发送人脸检测结果"""
@@ -134,29 +111,28 @@ class K230SlaveController:
             return False, "Invalid func_id"
         
         if func_id not in self.func_handlers:
-            return False, "Unknown function: %d" % func_id
+            return False, "Unknown function:%d" % func_id
         
         if self.state == K230Protocol.STATE_RUNNING:
-            # 先停止当前功能
-            self._stop_current_function()
+            # 标记停止，让当前功能退出
+            self.pending_stop = True
+            return False, "BUSY,stop current first"
         
-        # 启动新功能
+        # 设置要启动的功能
         self.current_func_id = func_id
         self.stop_flag = False
-        self.state = K230Protocol.STATE_RUNNING
+        self.pending_stop = False
         
-        # 在新线程中执行功能
-        _thread.start_new_thread(self._run_function, (func_id,))
-        
-        return True, "Started:%d" % func_id
+        return True, "Starting:%d" % func_id
     
     def _handle_stop(self, params):
         """处理STOP命令"""
         if self.state != K230Protocol.STATE_RUNNING:
             return True, "Already stopped"
         
-        self._stop_current_function()
-        return True, "Stopped"
+        self.pending_stop = True
+        self.stop_flag = True
+        return True, "Stopping"
     
     def _handle_status(self, params):
         """处理STATUS命令"""
@@ -166,54 +142,50 @@ class K230SlaveController:
     def _handle_ping(self, params):
         """处理PING命令"""
         self.send_response(K230Protocol.RSP_PONG, "K230")
-        return None, None  # 已经发送响应，不需要额外响应
+        return None, None
     
     def _handle_reset(self, params):
         """处理RESET命令"""
-        self._stop_current_function()
-        self.state = K230Protocol.STATE_IDLE
-        self.current_func_id = 0
+        self.pending_stop = True
+        self.stop_flag = True
         gc.collect()
-        return True, "Reset complete"
+        return True, "Reset"
     
     def _handle_register(self, params):
-        """处理REG命令 (人脸注册)"""
+        """处理REG命令"""
         if len(params) < 2:
-            return False, "Usage: REG,<user_id>,<photo_path>"
+            return False, "Usage:REG,user_id,photo_path"
         
         user_id = params[0]
         photo_path = params[1]
         
-        # 调用注册功能（如果已注册）
-        if K230Protocol.ID_FACE_REGISTER in self.func_handlers:
-            # 标记为忙碌
-            self.state = K230Protocol.STATE_BUSY
+        if K230Protocol.ID_FACE_REGISTER in self.func_once_handlers:
+            if self.state == K230Protocol.STATE_RUNNING:
+                return False, "BUSY,stop AI first"
             
+            self.state = K230Protocol.STATE_BUSY
             try:
-                handler = self.func_handlers[K230Protocol.ID_FACE_REGISTER]
+                handler = self.func_once_handlers[K230Protocol.ID_FACE_REGISTER]
                 success, msg = handler(self, user_id, photo_path)
-                self.state = K230Protocol.STATE_IDLE
                 return success, msg
             except Exception as e:
-                self.state = K230Protocol.STATE_IDLE
                 return False, str(e)
+            finally:
+                self.state = K230Protocol.STATE_IDLE
         else:
-            return False, "Register function not available"
+            return False, "Register not available"
     
     def _handle_list(self, params):
-        """处理LIST命令 (列出注册人脸)"""
+        """处理LIST命令"""
         import os
         try:
             db_dir = self.config.get('database_dir', '/data/face_database/')
-            
-            # 获取用户目录列表
             try:
                 os.stat(db_dir)
                 users = []
                 for item in os.listdir(db_dir):
                     if item.endswith('.bin'):
                         users.append(item[:-4])
-                
                 return True, ",".join(users) if users else "empty"
             except:
                 return True, "empty"
@@ -221,9 +193,9 @@ class K230SlaveController:
             return False, str(e)
     
     def _handle_delete(self, params):
-        """处理DELETE命令 (删除注册人脸)"""
+        """处理DELETE命令"""
         if len(params) < 1:
-            return False, "Usage: DELETE,<user_id>"
+            return False, "Usage:DELETE,user_id"
         
         import os
         user_id = params[0]
@@ -231,40 +203,34 @@ class K230SlaveController:
         
         try:
             bin_path = db_dir + user_id + ".bin"
-            
-            try:
-                os.remove(bin_path)
-                return True, "Deleted:%s" % user_id
-            except:
-                return False, "User not found"
-                
-        except Exception as e:
-            return False, str(e)
+            os.remove(bin_path)
+            return True, "Deleted:%s" % user_id
+        except:
+            return False, "Not found"
     
     def _handle_set(self, params):
-        """处理SET命令 (设置参数)"""
+        """处理SET命令"""
         if len(params) < 2:
-            return False, "Usage: SET,<key>,<value>"
+            return False, "Usage:SET,key,value"
         
         key = params[0]
         value = params[1]
         
-        # 尝试转换数值
         try:
             if '.' in value:
                 value = float(value)
             else:
                 value = int(value)
         except:
-            pass  # 保持字符串
+            pass
         
         self.config[key] = value
         return True, "%s=%s" % (key, str(value))
     
     def _handle_get(self, params):
-        """处理GET命令 (获取参数)"""
+        """处理GET命令"""
         if len(params) < 1:
-            return False, "Usage: GET,<key>"
+            return False, "Usage:GET,key"
         
         key = params[0]
         if key in self.config:
@@ -272,64 +238,41 @@ class K230SlaveController:
         else:
             return False, "Unknown key"
     
-    # ========== 功能执行 ==========
-    def _run_function(self, func_id):
-        """在线程中运行功能"""
-        try:
-            # 初始化
-            if func_id in self.func_init_handlers:
-                self.current_func_obj = self.func_init_handlers[func_id](self)
-            
-            # 执行
-            handler = self.func_handlers[func_id]
-            handler(self, lambda: self.stop_flag)
-            
-        except Exception as e:
-            print("[Controller] Function error:", e)
-            self.send_response(K230Protocol.RSP_ERROR, str(e))
-        
-        finally:
-            # 清理
-            self._cleanup_function(func_id)
-            self.state = K230Protocol.STATE_IDLE
-            self.current_func_id = 0
-    
-    def _stop_current_function(self):
-        """停止当前功能"""
-        self.stop_flag = True
-        # 等待功能结束
-        timeout = 50  # 5秒超时
-        while self.state == K230Protocol.STATE_RUNNING and timeout > 0:
-            time.sleep_ms(100)
-            timeout -= 1
-    
-    def _cleanup_function(self, func_id):
-        """清理功能"""
-        if func_id in self.func_deinit_handlers and self.current_func_obj:
-            try:
-                self.func_deinit_handlers[func_id](self.current_func_obj)
-            except Exception as e:
-                print("[Controller] Cleanup error:", e)
-        self.current_func_obj = None
-        gc.collect()
-    
-    # ========== 主循环 ==========
-    def process_commands(self):
-        """处理接收到的命令（非阻塞，在主循环中调用）"""
-        line = self.uart.receive_line()
-        if line is None:
-            return
+    # ========== 命令处理循环 ==========
+    def check_and_process_command(self):
+        """
+        检查并处理命令（非阻塞）
+        返回: True 如果需要停止当前功能
+        """
+        cmd_str = self.uart.receive_command()
+        if cmd_str is None:
+            return self.pending_stop
         
         # 解析命令
-        cmd, params = self.protocol.parse_command(line)
+        cmd, params = self.protocol.parse_command(cmd_str)
         if cmd is None:
-            return
+            return self.pending_stop
         
-        # 查找处理器
+        print("[Controller] CMD:", cmd, params)
+        
+        # 在运行状态下，只处理 STOP/STATUS/PING
+        if self.state == K230Protocol.STATE_RUNNING:
+            if cmd == K230Protocol.CMD_STOP:
+                self.pending_stop = True
+                self.stop_flag = True
+                self.send_response(K230Protocol.RSP_OK, "Stopping")
+            elif cmd == K230Protocol.CMD_STATUS:
+                result = self._handle_status(params)
+                self.send_response(K230Protocol.RSP_OK, result[1])
+            elif cmd == K230Protocol.CMD_PING:
+                self._handle_ping(params)
+            else:
+                self.send_response(K230Protocol.RSP_BUSY, "Running func:%d" % self.current_func_id)
+            return self.pending_stop
+        
+        # 空闲状态，处理所有命令
         if cmd in self.cmd_handlers:
             result = self.cmd_handlers[cmd](params)
-            
-            # 发送响应（如果处理器返回了结果）
             if result and result[0] is not None:
                 success, msg = result
                 if success:
@@ -337,29 +280,116 @@ class K230SlaveController:
                 else:
                     self.send_response(K230Protocol.RSP_ERROR, msg)
         else:
-            self.send_response(K230Protocol.RSP_ERROR, "Unknown command: %s" % cmd)
+            self.send_response(K230Protocol.RSP_ERROR, "Unknown:%s" % cmd)
+        
+        return self.pending_stop
     
+    # ========== 功能执行 ==========
+    def _init_function(self, func_id):
+        """初始化功能"""
+        if func_id in self.func_init_handlers:
+            print("[Controller] Init function:", func_id)
+            self.current_func_obj = self.func_init_handlers[func_id](self)
+            return True
+        return False
+    
+    def _run_function_once(self, func_id):
+        """执行一帧功能"""
+        if func_id in self.func_handlers:
+            handler = self.func_handlers[func_id]
+            # 传入 stop_check 回调
+            handler(self, lambda: self.stop_flag)
+    
+    def _deinit_function(self, func_id):
+        """清理功能"""
+        if func_id in self.func_deinit_handlers and self.current_func_obj:
+            print("[Controller] Deinit function:", func_id)
+            try:
+                self.func_deinit_handlers[func_id](self.current_func_obj)
+            except Exception as e:
+                print("[Controller] Deinit error:", e)
+        self.current_func_obj = None
+        gc.collect()
+    
+    # ========== 主循环 ==========
     def run(self):
-        """
-        主运行循环
-        持续处理命令
-        """
+        """主运行循环 - 单线程状态机"""
         self.running = True
+        self.uart.clear_buffer()
+        
         print("[Controller] Running...")
         self.send_response(K230Protocol.RSP_READY, "K230")
         
         while self.running:
             try:
-                self.process_commands()
-                time.sleep_us(1)  # 让出CPU时间
+                # 空闲状态：等待命令
+                if self.state == K230Protocol.STATE_IDLE:
+                    self.check_and_process_command()
+                    
+                    # 检查是否有功能要启动
+                    if self.current_func_id != 0 and not self.stop_flag:
+                        func_id = self.current_func_id
+                        
+                        # 初始化功能
+                        try:
+                            self._init_function(func_id)
+                            self.state = K230Protocol.STATE_RUNNING
+                            self.send_response(K230Protocol.RSP_OK, "Started:%d" % func_id)
+                            print("[Controller] Started function:", func_id)
+                        except Exception as e:
+                            print("[Controller] Init error:", e)
+                            self.send_response(K230Protocol.RSP_ERROR, str(e))
+                            self.current_func_id = 0
+                    
+                    time.sleep_ms(10)
+                
+                # 运行状态：执行功能 + 检查命令
+                elif self.state == K230Protocol.STATE_RUNNING:
+                    func_id = self.current_func_id
+                    
+                    # 执行一帧
+                    try:
+                        self._run_function_once(func_id)
+                    except Exception as e:
+                        print("[Controller] Run error:", e)
+                        self.pending_stop = True
+                    
+                    # 检查命令（非阻塞）
+                    self.check_and_process_command()
+                    
+                    # 检查是否需要停止
+                    if self.pending_stop or self.stop_flag:
+                        print("[Controller] Stopping function:", func_id)
+                        self._deinit_function(func_id)
+                        self.state = K230Protocol.STATE_IDLE
+                        self.current_func_id = 0
+                        self.pending_stop = False
+                        self.stop_flag = False
+                        self.send_response(K230Protocol.RSP_OK, "Stopped")
+                
+                else:
+                    # 其他状态，检查命令
+                    self.check_and_process_command()
+                    time.sleep_ms(10)
+                
+            except KeyboardInterrupt:
+                print("[Controller] Keyboard interrupt")
+                break
             except Exception as e:
                 print("[Controller] Error:", e)
                 time.sleep_ms(100)
+        
+        # 清理
+        if self.state == K230Protocol.STATE_RUNNING:
+            self._deinit_function(self.current_func_id)
+        
+        print("[Controller] Stopped")
     
     def stop(self):
         """停止控制器"""
         self.running = False
-        self._stop_current_function()
+        self.pending_stop = True
+        self.stop_flag = True
     
     def deinit(self):
         """释放资源"""

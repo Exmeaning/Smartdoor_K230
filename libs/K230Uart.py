@@ -1,87 +1,75 @@
 """
 K230 串口通信模块
-基于已有的YbUart封装
 """
 
 from ybUtils.YbUart import YbUart
 
 class K230Uart:
-    """K230串口通信类 - 封装YbUart"""
+    """K230串口通信类"""
     
     def __init__(self, baudrate=115200, rx_buffer_size=512):
-        """
-        初始化串口
-        
-        参数:
-            baudrate: 波特率
-            rx_buffer_size: 接收缓冲区大小
-        """
-        # 使用已有的YbUart类（已配置好FPIOA）
         self.uart = YbUart(baudrate=baudrate)
-        
         self.rx_buffer = ""
         self.rx_buffer_max = rx_buffer_size
         self.debug = False
-        
         print("[UART] Initialized at %d baud" % baudrate)
     
     def send(self, data):
-        """
-        发送数据
-        
-        参数:
-            data: 字符串或字节数据
-        """
+        """发送数据"""
         try:
             if isinstance(data, str):
                 data = data.encode('utf-8')
             self.uart.send(data)
-            
             if self.debug:
                 print("[UART] TX:", data)
-            
             return len(data)
         except Exception as e:
             print("[UART] Send error:", e)
             return 0
     
-    def send_line(self, text):
-        """发送一行文本（自动添加换行）"""
-        if not text.endswith('\n'):
-            text += '\n'
-        return self.send(text)
-    
-    def receive_line(self):
+    def receive_command(self):
         """
-        接收一行数据（非阻塞）
-        
-        返回:
-            收到完整行返回字符串，否则返回None
+        接收命令（以 # 结尾的完整命令）
+        支持 $CMD,...# 格式
+        返回: 完整命令字符串 或 None
         """
         try:
-            # 使用YbUart的receive方法读取数据
+            # 读取新数据
             data = self.uart.read()
             if data and len(data) > 0:
-                # 解码并添加到缓冲区
                 try:
-                    self.rx_buffer += data.decode('utf-8')
+                    text = data.decode('utf-8')
                 except:
-                    self.rx_buffer += data.decode('utf-8', 'ignore')
+                    text = data.decode('utf-8', 'ignore')
+                
+                # 清理换行符，统一处理
+                text = text.replace('\r\n', '').replace('\r', '').replace('\n', '')
+                self.rx_buffer += text
                 
                 # 防止缓冲区溢出
                 if len(self.rx_buffer) > self.rx_buffer_max:
-                    self.rx_buffer = self.rx_buffer[-self.rx_buffer_max:]
+                    # 尝试找到最后一个 $ 开始保留
+                    last_start = self.rx_buffer.rfind('$')
+                    if last_start > 0:
+                        self.rx_buffer = self.rx_buffer[last_start:]
+                    else:
+                        self.rx_buffer = self.rx_buffer[-256:]
             
-            # 查找完整的行
-            if '\n' in self.rx_buffer:
-                idx = self.rx_buffer.index('\n')
-                line = self.rx_buffer[:idx].strip()
-                self.rx_buffer = self.rx_buffer[idx + 1:]
+            # 查找完整命令: $CMD,...#
+            if '$' in self.rx_buffer and '#' in self.rx_buffer:
+                start_idx = self.rx_buffer.find('$')
+                end_idx = self.rx_buffer.find('#', start_idx)
                 
-                if self.debug and line:
-                    print("[UART] RX:", line)
-                
-                return line if line else None
+                if start_idx >= 0 and end_idx > start_idx:
+                    # 提取完整命令（包含 $ 和 #）
+                    cmd = self.rx_buffer[start_idx:end_idx + 1]
+                    # 移除已处理的部分
+                    self.rx_buffer = self.rx_buffer[end_idx + 1:]
+                    
+                    if self.debug:
+                        print("[UART] RX CMD:", cmd)
+                    
+                    return cmd
             
             return None
             
@@ -93,6 +81,14 @@ class K230Uart:
     def clear_buffer(self):
         """清空接收缓冲区"""
         self.rx_buffer = ""
+        # 也清空硬件缓冲区
+        try:
+            while True:
+                data = self.uart.read()
+                if not data or len(data) == 0:
+                    break
+        except:
+            pass
     
     def deinit(self):
         """释放资源"""

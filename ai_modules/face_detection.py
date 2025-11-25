@@ -1,5 +1,5 @@
 """
-人脸检测功能模块
+人脸检测功能模块 - 单帧处理模式
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
@@ -9,7 +9,6 @@ from media.media import *
 import nncase_runtime as nn
 import ulab.numpy as np
 import aidemo
-import time
 import gc
 
 class FaceDetectionApp(AIBase):
@@ -73,13 +72,14 @@ class FaceDetectionApp(AIBase):
 
 def face_detect_init(controller):
     """初始化人脸检测"""
+    print("[FaceDetect] Initializing...")
+    
     kmodel_path = "/sdcard/kmodel/face_detection_320.kmodel"
     anchors_path = "/sdcard/utils/prior_data_320.bin"
     
     anchors = np.fromfile(anchors_path, dtype=np.float)
     anchors = anchors.reshape((4200, 4))
     
-    # 获取配置
     conf_threshold = controller.config.get('detect_threshold', 0.5)
     nms_threshold = controller.config.get('nms_threshold', 0.2)
     
@@ -103,62 +103,74 @@ def face_detect_init(controller):
     )
     face_det.config_preprocess()
     
-    return {'pipeline': pl, 'detector': face_det, 'display_size': display_size, 
-            'rgb888p_size': rgb888p_size}
+    print("[FaceDetect] Initialized")
+    
+    return {
+        'pipeline': pl, 
+        'detector': face_det, 
+        'display_size': display_size, 
+        'rgb888p_size': rgb888p_size,
+        'frame_count': 0
+    }
 
 
 def face_detect_handler(controller, stop_check):
-    """人脸检测处理函数"""
+    """
+    人脸检测处理函数 - 每次调用处理一帧
+    注意：这个函数会被主循环反复调用，不是自己循环！
+    """
     obj = controller.current_func_obj
+    if obj is None:
+        return
+    
     pl = obj['pipeline']
     face_det = obj['detector']
     display_size = obj['display_size']
     rgb888p_size = obj['rgb888p_size']
     
-    print("[FaceDetect] Running...")
-    
-    while not stop_check():
-        try:
-            # 获取帧
-            img = pl.get_frame()
-            
-            # 运行检测
-            dets = face_det.run(img)
-            
-            # 处理结果
-            if dets:
-                pl.osd_img.clear()
-                for det in dets:
-                    x, y, w, h = map(lambda x: int(round(x, 0)), det[:4])
-                    
-                    # 坐标转换
-                    x_disp = x * display_size[0] // rgb888p_size[0]
-                    y_disp = y * display_size[1] // rgb888p_size[1]
-                    w_disp = w * display_size[0] // rgb888p_size[0]
-                    h_disp = h * display_size[1] // rgb888p_size[1]
-                    
-                    # 绘制
-                    pl.osd_img.draw_rectangle(x_disp, y_disp, w_disp, h_disp, 
-                                              color=(255, 255, 0, 255), thickness=2)
-                    
-                    # 发送数据给主机
-                    controller.send_face_detect(x, y, w, h)
-            else:
-                pl.osd_img.clear()
-            
-            pl.show_image()
+    try:
+        # 获取帧
+        img = pl.get_frame()
+        
+        # 运行检测
+        dets = face_det.run(img)
+        
+        # 清除OSD
+        pl.osd_img.clear()
+        
+        # 处理结果
+        if dets:
+            for det in dets:
+                x, y, w, h = map(lambda v: int(round(v, 0)), det[:4])
+                
+                # 坐标转换
+                x_disp = x * display_size[0] // rgb888p_size[0]
+                y_disp = y * display_size[1] // rgb888p_size[1]
+                w_disp = w * display_size[0] // rgb888p_size[0]
+                h_disp = h * display_size[1] // rgb888p_size[1]
+                
+                # 绘制
+                pl.osd_img.draw_rectangle(x_disp, y_disp, w_disp, h_disp, 
+                                          color=(255, 255, 0, 255), thickness=2)
+                
+                # 发送数据
+                controller.send_face_detect(x, y, w, h)
+        
+        # 显示
+        pl.show_image()
+        
+        # 定期GC
+        obj['frame_count'] = obj.get('frame_count', 0) + 1
+        if obj['frame_count'] % 30 == 0:
             gc.collect()
-            time.sleep_us(1)
-            
-        except Exception as e:
-            print("[FaceDetect] Error:", e)
-            break
-    
-    print("[FaceDetect] Stopped")
+        
+    except Exception as e:
+        print("[FaceDetect] Frame error:", e)
 
 
 def face_detect_deinit(obj):
     """清理人脸检测"""
+    print("[FaceDetect] Deinitializing...")
     try:
         if obj and 'detector' in obj:
             obj['detector'].deinit()
@@ -166,3 +178,4 @@ def face_detect_deinit(obj):
             obj['pipeline'].destroy()
     except Exception as e:
         print("[FaceDetect] Deinit error:", e)
+    print("[FaceDetect] Deinitialized")

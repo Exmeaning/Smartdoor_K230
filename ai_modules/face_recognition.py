@@ -1,5 +1,5 @@
 """
-人脸识别功能模块
+人脸识别功能模块 - 单帧处理模式
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
@@ -9,11 +9,9 @@ from media.media import *
 import nncase_runtime as nn
 import ulab.numpy as np
 import aidemo
-import time
 import gc
 import os
 import math
-import re
 
 
 class FaceDetApp(AIBase):
@@ -87,7 +85,6 @@ class FaceFeatureApp(AIBase):
         self.display_size = [ALIGN_UP(display_size[0], 16), display_size[1]]
         self.debug_mode = debug_mode
         
-        # 标准人脸关键点
         self.umeyama_args_112 = [
             38.2946, 51.6963, 73.5318, 51.5014, 56.0252, 71.7366,
             41.5493, 92.3655, 70.7299, 92.2041
@@ -110,7 +107,6 @@ class FaceFeatureApp(AIBase):
             return results[0][0]
     
     def svd22(self, a):
-        """2x2矩阵SVD分解"""
         s = [0.0, 0.0]
         u = [0.0, 0.0, 0.0, 0.0]
         v = [0.0, 0.0, 0.0, 0.0]
@@ -136,7 +132,6 @@ class FaceFeatureApp(AIBase):
         return u, s, v
     
     def image_umeyama_112(self, src):
-        """Umeyama对齐算法"""
         SRC_NUM = 5
         SRC_DIM = 2
         
@@ -227,13 +222,11 @@ class FaceRecognitionEngine:
         self.rgb888p_size = [ALIGN_UP(rgb888p_size[0], 16), rgb888p_size[1]]
         self.display_size = [ALIGN_UP(display_size[0], 16), display_size[1]]
         
-        # 数据库
         self.max_faces = 100
         self.feature_dim = 128
         self.db_names = []
         self.db_features = []
         
-        # 初始化模型
         self.face_det = FaceDetApp(
             self.face_det_kmodel,
             model_input_size=self.det_input_size,
@@ -255,9 +248,10 @@ class FaceRecognitionEngine:
         self._load_database()
     
     def _load_database(self):
-        """加载人脸数据库"""
         try:
-            if not self._path_exists(self.database_dir):
+            try:
+                os.stat(self.database_dir)
+            except:
                 print("[FaceRec] Database dir not found:", self.database_dir)
                 return
             
@@ -278,21 +272,10 @@ class FaceRecognitionEngine:
         except Exception as e:
             print("[FaceRec] Load database error:", e)
     
-    def _path_exists(self, path):
-        """检查路径是否存在"""
-        try:
-            os.stat(path)
-            return True
-        except:
-            return False
-    
     def run(self, input_np):
-        """运行人脸识别"""
-        # 检测人脸
         det_boxes, landms = self.face_det.run(input_np)
         results = []
         
-        # 识别每个人脸
         for landm in landms:
             self.face_feature.config_preprocess(landm)
             feature = self.face_feature.run(input_np)
@@ -302,11 +285,9 @@ class FaceRecognitionEngine:
         return det_boxes, results
     
     def _search_database(self, feature):
-        """在数据库中搜索匹配"""
         if len(self.db_names) == 0:
             return "unknown", 0.0
         
-        # 归一化
         feature = feature / np.linalg.norm(feature)
         
         best_id = -1
@@ -326,13 +307,11 @@ class FaceRecognitionEngine:
         return self.db_names[best_id], best_score
     
     def reload_database(self):
-        """重新加载数据库"""
         self.db_names = []
         self.db_features = []
         self._load_database()
     
     def deinit(self):
-        """释放资源"""
         self.face_det.deinit()
         self.face_feature.deinit()
 
@@ -341,6 +320,8 @@ class FaceRecognitionEngine:
 
 def face_recog_init(controller):
     """初始化人脸识别"""
+    print("[FaceRecog] Initializing...")
+    
     kmodel_det = "/sdcard/kmodel/face_detection_320.kmodel"
     kmodel_reg = "/sdcard/kmodel/face_recognition.kmodel"
     anchors_path = "/sdcard/utils/prior_data_320.bin"
@@ -354,11 +335,9 @@ def face_recog_init(controller):
     rgb888p_size = [640, 480]
     display_size = [640, 480]
     
-    # 创建Pipeline
     pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
     pl.create()
     
-    # 创建识别引擎
     engine = FaceRecognitionEngine(
         kmodel_det, kmodel_reg,
         det_input_size=[320, 320],
@@ -370,70 +349,70 @@ def face_recog_init(controller):
         display_size=display_size
     )
     
+    print("[FaceRecog] Initialized")
+    
     return {
         'pipeline': pl,
         'engine': engine,
         'display_size': display_size,
-        'rgb888p_size': rgb888p_size
+        'rgb888p_size': rgb888p_size,
+        'frame_count': 0
     }
 
 
 def face_recog_handler(controller, stop_check):
-    """人脸识别处理函数"""
+    """人脸识别处理函数 - 每次调用处理一帧"""
     obj = controller.current_func_obj
+    if obj is None:
+        return
+    
     pl = obj['pipeline']
     engine = obj['engine']
     display_size = obj['display_size']
     rgb888p_size = obj['rgb888p_size']
     
-    print("[FaceRecog] Running...")
-    
-    while not stop_check():
-        try:
-            img = pl.get_frame()
-            det_boxes, results = engine.run(img)
-            
-            pl.osd_img.clear()
-            
-            if det_boxes is not None and len(det_boxes) > 0:
-                for i, det in enumerate(det_boxes):
-                    x, y, w, h = map(lambda v: int(round(v, 0)), det[:4])
-                    
-                    # 坐标转换
-                    x_d = x * display_size[0] // rgb888p_size[0]
-                    y_d = y * display_size[1] // rgb888p_size[1]
-                    w_d = w * display_size[0] // rgb888p_size[0]
-                    h_d = h * display_size[1] // rgb888p_size[1]
-                    
-                    name, score = results[i] if i < len(results) else ("unknown", 0)
-                    
-                    # 绘制
-                    if name == "unknown":
-                        color = (255, 0, 0, 255)  # 红色
-                    else:
-                        color = (255, 0, 255, 0)  # 绿色
-                    
-                    pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, color=color, thickness=2)
-                    
-                    text = "%s:%.2f" % (name, score) if name != "unknown" else "unknown"
-                    pl.osd_img.draw_string_advanced(x_d, y_d - 20, 20, text, color=(255, 255, 0, 0))
-                    
-                    # 发送数据
-                    controller.send_face_recognition(x, y, w, h, name, score)
-            
-            pl.show_image()
+    try:
+        img = pl.get_frame()
+        det_boxes, results = engine.run(img)
+        
+        pl.osd_img.clear()
+        
+        if det_boxes is not None and len(det_boxes) > 0:
+            for i, det in enumerate(det_boxes):
+                x, y, w, h = map(lambda v: int(round(v, 0)), det[:4])
+                
+                x_d = x * display_size[0] // rgb888p_size[0]
+                y_d = y * display_size[1] // rgb888p_size[1]
+                w_d = w * display_size[0] // rgb888p_size[0]
+                h_d = h * display_size[1] // rgb888p_size[1]
+                
+                name, score = results[i] if i < len(results) else ("unknown", 0)
+                
+                if name == "unknown":
+                    color = (255, 0, 0, 255)
+                else:
+                    color = (255, 0, 255, 0)
+                
+                pl.osd_img.draw_rectangle(x_d, y_d, w_d, h_d, color=color, thickness=2)
+                
+                text = "%s:%.2f" % (name, score) if name != "unknown" else "unknown"
+                pl.osd_img.draw_string_advanced(x_d, y_d - 20, 20, text, color=(255, 255, 0, 0))
+                
+                controller.send_face_recognition(x, y, w, h, name, score)
+        
+        pl.show_image()
+        
+        obj['frame_count'] = obj.get('frame_count', 0) + 1
+        if obj['frame_count'] % 30 == 0:
             gc.collect()
-            time.sleep_us(1)
-            
-        except Exception as e:
-            print("[FaceRecog] Error:", e)
-            break
-    
-    print("[FaceRecog] Stopped")
+        
+    except Exception as e:
+        print("[FaceRecog] Frame error:", e)
 
 
 def face_recog_deinit(obj):
     """清理人脸识别"""
+    print("[FaceRecog] Deinitializing...")
     try:
         if obj and 'engine' in obj:
             obj['engine'].deinit()
@@ -441,3 +420,4 @@ def face_recog_deinit(obj):
             obj['pipeline'].destroy()
     except Exception as e:
         print("[FaceRecog] Deinit error:", e)
+    print("[FaceRecog] Deinitialized")
