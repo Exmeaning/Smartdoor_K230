@@ -1,18 +1,18 @@
 """
-人脸检测 - 简化测试版
-用于定位资源释放问题
+人脸检测功能模块 - 多线程版本
+关键：在循环中添加 time.sleep_us(1) 让出CPU
 """
 
 from libs.PipeLine import PipeLine, ScopedTiming
 from libs.AIBase import AIBase
 from libs.AI2D import Ai2d
+from libs.MediaHelper import MediaHelper, safe_cleanup
 from media.media import *
 import nncase_runtime as nn
 import ulab.numpy as np
 import aidemo
 import gc
 import time
-
 
 class FaceDetectionApp(AIBase):
     """人脸检测应用类"""
@@ -77,6 +77,9 @@ def face_detect_init(controller):
     """初始化人脸检测"""
     print("[FaceDetect] Initializing...")
     
+    gc.collect()
+    time.sleep(0.1)
+    
     kmodel_path = "/sdcard/kmodel/face_detection_320.kmodel"
     anchors_path = "/sdcard/utils/prior_data_320.bin"
     
@@ -89,11 +92,10 @@ def face_detect_init(controller):
     rgb888p_size = [640, 480]
     display_size = [640, 480]
     
-    # 创建Pipeline
     pl = PipeLine(rgb888p_size=rgb888p_size, display_size=display_size, display_mode="lcd")
     pl.create()
+    MediaHelper.register_pipeline(pl)
     
-    # 创建检测器
     face_det = FaceDetectionApp(
         kmodel_path,
         model_input_size=[320, 320],
@@ -105,6 +107,7 @@ def face_detect_init(controller):
         debug_mode=0
     )
     face_det.config_preprocess()
+    MediaHelper.register_model(face_det)
     
     print("[FaceDetect] Initialized")
     
@@ -118,7 +121,7 @@ def face_detect_init(controller):
 
 
 def face_detect_handler(controller, stop_check):
-    """人脸检测处理函数"""
+    """人脸检测处理函数 - 多线程版本"""
     obj = controller.current_func_obj
     if obj is None:
         return
@@ -129,7 +132,16 @@ def face_detect_handler(controller, stop_check):
     rgb888p_size = obj['rgb888p_size']
     
     try:
+        # 检查是否需要停止
+        if stop_check():
+            return
+        
         img = pl.get_frame()
+        
+        # 再次检查
+        if stop_check():
+            return
+        
         dets = face_det.run(img)
         
         pl.osd_img.clear()
@@ -154,51 +166,58 @@ def face_detect_handler(controller, stop_check):
         if obj['frame_count'] % 30 == 0:
             gc.collect()
         
+        # 【关键】让出CPU时间
+        time.sleep_us(1)
+        
     except Exception as e:
         print("[FaceDetect] Frame error:", e)
+        time.sleep_ms(10)
 
 
 def face_detect_deinit(obj):
-    """清理人脸检测 - 测试不同的清理顺序"""
+    """清理人脸检测"""
     print("[FaceDetect] Deinitializing...")
     
-    if obj is None:
-        print("[FaceDetect] obj is None, skip")
-        return
+    pipeline = None
+    detector = None
     
-    pipeline = obj.get('pipeline')
-    detector = obj.get('detector')
-    
-    # ========== 测试方案 A：先模型后Pipeline ==========
-    print("[FaceDetect] Trying: Model first, then Pipeline")
-    
-    # 1. 释放模型
-    if detector:
-        print("[FaceDetect] Releasing model...")
+    try:
+        if obj:
+            pipeline = obj.get('pipeline')
+            detector = obj.get('detector')
+        
+        print("[FaceDetect] Step 1: Release model...")
+        if detector:
+            try:
+                detector.deinit()
+                print("[FaceDetect] Model released")
+            except Exception as e:
+                print("[FaceDetect] Model release error:", e)
+        
+        time.sleep(0.1)
+        gc.collect()
+        
+        print("[FaceDetect] Step 2: Destroy pipeline...")
+        if pipeline:
+            try:
+                pipeline.destroy()
+                print("[FaceDetect] Pipeline destroyed")
+            except Exception as e:
+                print("[FaceDetect] Pipeline destroy error:", e)
+        
+        print("[FaceDetect] Step 3: Wait for cleanup...")
+        time.sleep(0.5)
+        
+        gc.collect()
+        time.sleep(0.2)
+        gc.collect()
+        
+    except Exception as e:
+        print("[FaceDetect] Deinit error:", e)
         try:
-            detector.deinit()
-            print("[FaceDetect] Model released OK")
-        except Exception as e:
-            print("[FaceDetect] Model release error:", e)
-    
-    # 2. 等待
-    time.sleep(0.2)
-    gc.collect()
-    
-    # 3. 销毁 Pipeline
-    if pipeline:
-        print("[FaceDetect] Destroying pipeline...")
-        try:
-            pipeline.destroy()
-            print("[FaceDetect] Pipeline destroyed OK")
-        except Exception as e:
-            print("[FaceDetect] Pipeline destroy error:", e)
-    
-    # 4. 最终清理
-    print("[FaceDetect] Final cleanup...")
-    time.sleep(0.5)
-    gc.collect()
-    time.sleep(0.3)
-    gc.collect()
+            MediaManager.deinit()
+        except:
+            pass
+        gc.collect()
     
     print("[FaceDetect] Deinitialized")

@@ -1,5 +1,5 @@
 """
-K230 从机端主程序
+K230 从机端主程序 - 多线程版本
 支持人脸检测、识别、注册功能
 """
 
@@ -29,7 +29,7 @@ from ai_modules.face_register import (
 
 def main():
     print("=" * 50)
-    print("K230 Slave Controller")
+    print("K230 Slave Controller (Multi-thread)")
     print("Face Detection / Recognition / Registration")
     print("=" * 50)
     
@@ -61,31 +61,20 @@ def main():
     controller.config['detect_threshold'] = 0.5
     controller.config['register_timeout'] = 15
     
-    # 打印帮助信息
+    print("\n=== Multi-thread Architecture ===")
+    print("  Main Thread:  Command processing")
+    print("  AI Thread:    AI inference loop")
+    
     print("\n=== Registered Functions ===")
     print("  Face Detection   (ID=%d)" % K230Protocol.ID_FACE_DETECT)
     print("  Face Recognition (ID=%d)" % K230Protocol.ID_FACE_RECOGNITION)
     
-    print("\n=== Available Commands ===")
-    print("  $CMD,PING#                      - Test connection")
-    print("  $CMD,STATUS#                    - Get status")
-    print("  $CMD,START,6#                   - Start face detection")
-    print("  $CMD,START,8#                   - Start face recognition")
-    print("  $CMD,STOP#                      - Stop current AI function")
-    print("  $CMD,REG,user_id,/path/photo#   - Register from photo")
-    print("  $CMD,REGCAM,user_id#            - Register from camera")
-    print("  $CMD,REGCAM,user_id,15#         - Register with 15s timeout")
-    print("  $CMD,LIST#                      - List registered users")
-    print("  $CMD,DELETE,user_id#            - Delete user")
-    print("  $CMD,SET,key,value#             - Set config")
-    print("  $CMD,GET,key#                   - Get config")
-    print("  $CMD,RESET#                     - Reset system")
-    
-    print("\n=== Config Keys ===")
-    print("  database_dir     - Face database path")
-    print("  face_threshold   - Recognition threshold (0.0-1.0)")
-    print("  detect_threshold - Detection threshold (0.0-1.0)")
-    print("  register_timeout - Camera register timeout (seconds)")
+    print("\n=== Commands ===")
+    print("  $CMD,START,6#   - Start face detection")
+    print("  $CMD,START,8#   - Start face recognition")
+    print("  $CMD,STOP#      - Stop (non-blocking!)")
+    print("  $CMD,PING#      - Test connection")
+    print("  $CMD,STATUS#    - Get status")
     
     print("\n" + "=" * 50)
     print("Waiting for commands...")
@@ -97,6 +86,8 @@ def main():
         print("\nInterrupted by user")
     except Exception as e:
         print("Fatal error:", e)
+        import sys
+        sys.print_exception(e)
     finally:
         controller.deinit()
         print("K230 Slave Controller stopped")
