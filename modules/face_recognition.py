@@ -83,15 +83,22 @@ class FaceFeatureApp(AIBase):
         self.std_points = [38.2946, 51.6963, 73.5318, 51.5014, 56.0252,
                           71.7366, 41.5493, 92.3655, 70.7299, 92.2041]
         
-        self.ai2d = Ai2d(debug_mode)
-        self.ai2d.set_ai2d_dtype(nn.ai2d_format.NCHW_FMT, nn.ai2d_format.NCHW_FMT,
-                                  np.uint8, np.uint8)
+        self.ai2d = None  # 延迟创建
     
     def config_preprocess(self, landm, input_image_size=None):
         """【关键】每次检测到人脸都需要重新配置"""
         ai2d_input_size = input_image_size if input_image_size else self.rgb888p_size
         
-        # 【重要】重建 ai2d 以避免状态污染
+        # 【修复】先释放旧的 ai2d 资源
+        if self.ai2d is not None:
+            try:
+                del self.ai2d
+                self.ai2d = None
+            except:
+                pass
+            gc.collect()  # 强制回收
+        
+        # 重建 ai2d
         self.ai2d = Ai2d(self.debug_mode)
         self.ai2d.set_ai2d_dtype(nn.ai2d_format.NCHW_FMT, nn.ai2d_format.NCHW_FMT,
                                   np.uint8, np.uint8)
@@ -260,21 +267,32 @@ class FaceRecognitionModule:
             # 人脸检测
             det_boxes, landms = self.face_det.run(img)
             
-            # 识别每个人脸
+            # 识别每个人脸（限制数量避免资源耗尽）
             recg_results = []
             if det_boxes is not None and landms is not None:
-                for landm in landms:
-                    # 【关键】每个人脸都重新配置预处理
+                # 【修复】每帧最多处理2个人脸，避免资源耗尽
+                max_faces = min(len(landms), 2)
+                
+                for i in range(max_faces):
+                    landm = landms[i]
+                    # 配置预处理并提取特征
                     self.face_reg.config_preprocess(landm)
                     feature = self.face_reg.run(img)
                     name, score = self._match_feature(feature)
                     recg_results.append((name, score))
+                
+                # 剩余人脸标记为 unknown
+                for i in range(max_faces, len(det_boxes)):
+                    recg_results.append(("unknown", 0.0))
             
             # 绘制和发送
             self._draw_and_send(pl, det_boxes, recg_results)
             
             # 显示
             pl.show_image()
+            
+            # 【修复】主动垃圾回收
+            gc.collect()
         
         return det_boxes, recg_results
     
@@ -343,13 +361,20 @@ class FaceRecognitionModule:
         """释放资源"""
         print("[FaceRec] Deinitializing...")
         
+        # 【修复】先释放 face_reg 的 ai2d
+        if self.face_reg:
+            if hasattr(self.face_reg, 'ai2d') and self.face_reg.ai2d is not None:
+                try:
+                    del self.face_reg.ai2d
+                    self.face_reg.ai2d = None
+                except:
+                    pass
+            self.face_reg.deinit()
+            self.face_reg = None
+        
         if self.face_det:
             self.face_det.deinit()
             self.face_det = None
-        
-        if self.face_reg:
-            self.face_reg.deinit()
-            self.face_reg = None
         
         self.anchors = None
         self.db_names = []

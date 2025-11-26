@@ -251,12 +251,12 @@ class K230Controller:
                     self.pl.osd_img.clear()
                     self.pl.show_image()
                 
-                # 定期 GC
+                # 【修复】更频繁的 GC（人脸识别消耗大）
                 frame_count += 1
-                if frame_count % 300 == 0:
+                if frame_count % 50 == 0:
                     gc.collect()
                 
-                time.sleep_ms(1)
+                time.sleep_ms(5)  # 稍微增加延迟，减轻系统压力
                 
             except KeyboardInterrupt:
                 break
